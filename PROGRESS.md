@@ -41,7 +41,7 @@ The requested public port is complete on local `main`. The unified CLI, topology
 - Rewrote the README and configuration example for the complete public command surface and abstractions, retaining only the one-line former-name note.
 - Verified the vendored mirror is byte-identical to its source (`ec9bfc1bcad6fc708b1bb7e0c3b2d2fe12d977c4186bdbd5ae3cfa41dbdd04b2`).
 - Scrubbed the tracked tree and lockfile: all example emails use the reserved `example.com` domain, the named private identifiers and UUID-shaped values are absent, and no obsolete executable or environment namespace remains.
-- Completed the final suite: `358 passed in 29.61s`.
+- Completed the final suite at the committed tree: `358 passed in 23.48s`.
 
 ## Next
 
