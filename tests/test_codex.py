@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,6 +180,71 @@ class TestScanCache:
         out = codex.scan_rollout_signals(home, max_age_hours=24 * 365 * 10, runner=spy_runner)
         assert calls == []  # nothing changed -> no grep
         assert len(out["usage"]) == 1
+
+
+class TestTokenExpiredSignature:
+    def test_only_explicit_expired_401_matches(self):
+        assert codex.probe_looks_token_expired(
+            {
+                "status": "http-401",
+                "error": "Provided authentication token is expired. Please sign in again.",
+            }
+        )
+        for probe in (
+            {"status": "token-revoked", "error": "token expired"},
+            {"status": "http-403", "error": "token expired"},
+            {"status": "http-401", "error": "No access"},
+            {"status": "http-401"},
+            {"status": "ok"},
+        ):
+            assert not codex.probe_looks_token_expired(probe)
+
+
+class TestRefreshViaCli:
+    @staticmethod
+    def result(rc=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess([], rc, stdout, stderr)
+
+    def test_success_runs_resolved_exec_pinned_to_home(self, tmp_path, monkeypatch):
+        calls = {}
+        monkeypatch.setattr(codex, "_codex_binary", lambda: "/tools/codex-real")
+
+        def runner(command, **kwargs):
+            calls.update(command=command, kwargs=kwargs)
+            return self.result(stdout="ok\n")
+
+        output = codex.refresh_via_cli(tmp_path, runner=runner)
+
+        assert output["status"] == "ok"
+        assert calls["command"][:2] == ["/tools/codex-real", "exec"]
+        assert "--skip-git-repo-check" in calls["command"]
+        assert codex.REFRESH_PROBE_MODEL in calls["command"]
+        assert calls["kwargs"]["env"]["CODEX_HOME"] == str(tmp_path)
+        assert calls["kwargs"]["cwd"] == str(tmp_path)
+
+    def test_revocation_and_other_failures_are_classified(self, tmp_path):
+        revoked = codex.refresh_via_cli(
+            tmp_path,
+            runner=lambda *args, **kwargs: self.result(
+                stderr="refresh token was revoked"
+            ),
+        )
+        failed = codex.refresh_via_cli(
+            tmp_path,
+            runner=lambda *args, **kwargs: self.result(
+                rc=3, stderr="stream error\ncontent filter"
+            ),
+        )
+
+        assert revoked["status"] == "revoked"
+        assert failed["status"] == "failed" and failed["rc"] == 3
+        assert "content filter" in failed["detail"]
+
+    def test_timeout_is_a_soft_failure(self, tmp_path):
+        def timeout(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, 1)
+
+        assert codex.refresh_via_cli(tmp_path, runner=timeout)["status"] == "failed"
 
 
 class TestResetClock:

@@ -2,7 +2,7 @@
 
 ## State
 
-The public rename, unified CLI, topology/health behavior, durable ledger, login ritual, and hardened auto-picking runners are complete. The next slice commits the safe expired-token watchdog repair, followed by documentation and the final privacy audit.
+The public rename, unified CLI, topology/health behavior, durable ledger, login ritual, hardened auto-picking runners, and safe expired-token repair are complete. The final slice rewrites the documentation and performs the repository-wide privacy and legacy-name audit.
 
 ## Done
 
@@ -33,9 +33,11 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Hardened the Claude ledger to count normal and cached input tokens, ignore torn/non-finite records, retain legacy totals, and keep cooldown updates locked and monotonic.
 - Excluded malformed enrollments and missing secret-store items before dispatch, and made direct runner authentication failures persist the same 30-day cooldown as delegated runs.
 - Added free-plan and app-shadow handling to the normalized cross-provider capacity surface, classified Codex windows by duration, and filtered the app home and duplicate paths from explicit lane configuration.
-- Kept the expanded suite green (`342 passed in 22.98s`).
+- Added a strictly gated vendor-CLI refresh probe for expired Codex access tokens, with locked renewable leases, pre-command auth revalidation, a 20-minute retry interval, post-refresh re-probe, dry-run safety, and definitive revocation latching until re-login changes the auth timestamp.
+- Recomputed and persisted the healed snapshot before alert evaluation so auth recovery and fleet capacity are visible in the same watchdog cycle.
+- Kept the expanded suite green (`352 passed in 22.28s`).
 
 ## Next
 
-- Commit the one-shot, rate-limited Codex expired-access-token repair and its revocation latch.
-- Rewrite the README, scrub identifiers and legacy names, run the exact final suite, and prepare the local review report without pushing.
+- Rewrite the README and configuration example for the complete public CLI.
+- Scrub identifiers and legacy names, run the exact final suite, and prepare the local review report without pushing.

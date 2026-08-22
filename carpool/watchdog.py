@@ -5,7 +5,9 @@ Alerting contract (incident 2026-07-11 postmortem):
   — these are silent until a lane dies mid-program.
 - Alert on capacity cliffs (≤1 codex lane left, none left) with the earliest
   reset time, and on a Claude session limit with its reset time.
-- Never auto-heal: every alert names the exact command for the operator.
+- Never auto-login. The only automatic auth repair is a one-shot vendor-CLI
+  refresh probe for an expired access token. Definitive token revocations are
+  latched until a re-login changes the lane's auth timestamp.
 - Dedup: a condition alerts on transition, then at most every REALERT_HOURS
   while it persists; recovery of auth conditions sends one all-clear.
 - A run where every codex probe is a network error is treated as "machine
@@ -13,13 +15,20 @@ Alerting contract (incident 2026-07-11 postmortem):
   like success, but offline must not cry wolf either).
 """
 
+import fcntl
 import json
+import secrets
 import shlex
+import sys
+from contextlib import contextmanager
+from datetime import timedelta
+from pathlib import Path
 
-from . import config, notify, paths, snapshot
-from .util import atomic_write_json, fmt_clock, load_json, now_local, parse_iso
+from . import codex, config, notify, paths, snapshot
+from .util import atomic_write_json, fmt_clock, iso, load_json, now_local, parse_iso
 
 REALERT_HOURS = 6
+REFRESH_PROBE_SPACING_MIN = 20
 
 
 def _notify(subject: str, body: str, dry_run: bool) -> bool:
@@ -36,6 +45,330 @@ def _login_command(home: str) -> str:
     name = __import__("pathlib").Path(home).name
     target = name.removeprefix(".codex-") if name.startswith(".codex-") else "<lane>"
     return f"carpool login codex {target}"
+
+
+def _reprobe_home(home: str) -> dict:
+    """Read fresh auth and usage after the vendor CLI may have refreshed it."""
+    path = Path(home)
+    auth = codex.read_auth(path)
+    probe = codex.probe_wham(auth)
+    observed = None
+    if probe.get("status") != "ok":
+        observed = codex.latest_rollout_rate_limits(path)
+    return {"auth": auth, "probe": probe, "observed": observed}
+
+
+def _recount_codex_fleet(entries: list[dict], now) -> dict:
+    """Rebuild the fleet roll-up after an in-cycle refresh changes a lane."""
+    dispatchable = []
+    resets = []
+    for entry in entries:
+        windows = entry.get("windows") or {}
+        window = windows.get("five_hour") or windows.get("primary") or windows.get("weekly")
+        used = window.get("used_percent") if isinstance(window, dict) else None
+        if (
+            entry.get("verdict") == "ok"
+            and not entry.get("duplicate_of")
+            and used is not None
+            and 100.0 - float(used) >= snapshot.DEFAULT_MIN_HEADROOM
+        ):
+            dispatchable.append(entry)
+        if entry.get("verdict") in ("ok", "limited") and isinstance(window, dict):
+            reset = parse_iso(window.get("reset_at"))
+            if reset and reset > now:
+                resets.append(reset)
+    return {
+        "total_homes": len(entries),
+        "dispatchable_now": len(dispatchable),
+        "best_home": snapshot.dispatchable_best(entries),
+        "earliest_reset": iso(min(resets)) if resets else None,
+    }
+
+
+@contextmanager
+def _refresh_state_guard():
+    """Serialize refresh claims without holding a lock during provider work."""
+    state_path = paths.refresh_probes_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _refresh_state() -> dict:
+    value = load_json(paths.refresh_probes_path(), {}) or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _refresh_claim_owned(home: str, lease_id: str) -> bool:
+    with _refresh_state_guard():
+        state = _refresh_state()
+        current = state.get(home) or {}
+        owned = (
+            isinstance(current, dict)
+            and current.get("result") == "in-progress"
+            and secrets.compare_digest(str(current.get("lease_id") or ""), lease_id)
+        )
+        if owned:
+            state[home] = {**current, "attempted_at": iso(now_local())}
+            atomic_write_json(paths.refresh_probes_path(), state)
+        return owned
+
+
+def _store_refresh_state(
+    home: str,
+    value: dict,
+    *,
+    lease_id: str | None = None,
+) -> bool:
+    """Merge one result if this process still owns the refresh claim."""
+    with _refresh_state_guard():
+        state = _refresh_state()
+        if lease_id is not None:
+            current = state.get(home) or {}
+            if not isinstance(current, dict) or not secrets.compare_digest(
+                str(current.get("lease_id") or ""), lease_id
+            ):
+                return False
+        state[home] = value
+        atomic_write_json(paths.refresh_probes_path(), state)
+        return True
+
+
+def _auth_still_matches(entry: dict, auth_reader) -> bool:
+    """Fail closed if a re-login changed the home after snapshot probing."""
+    try:
+        current = auth_reader(Path(entry["home"]))
+    except Exception:
+        return False
+    if not isinstance(current, dict) or current.get("status") != "ok":
+        return False
+    comparisons = []
+    for snapshot_key, auth_key in (
+        ("auth_last_refresh", "last_refresh"),
+        ("account_id", "account_id"),
+        ("email", "email"),
+    ):
+        expected = entry.get(snapshot_key)
+        if expected is None:
+            continue
+        actual = current.get(auth_key)
+        comparisons.append(
+            isinstance(actual, str)
+            and str(expected).casefold() == actual.casefold()
+        )
+    return bool(comparisons) and all(comparisons)
+
+
+def heal_expired_codex_homes(
+    snap: dict,
+    dry_run: bool = False,
+    refresh_fn=None,
+    reprobe_fn=None,
+    auth_reader=None,
+) -> list[dict]:
+    """Refresh only lanes with a clearly expired access token.
+
+    The vendor CLI owns token rotation and persistence; carpool never writes a
+    lane's ``auth.json``. A refresh-token revocation is definitive and is
+    latched until ``auth_last_refresh`` changes. Other failures may retry after
+    ``REFRESH_PROBE_SPACING_MIN``. The snapshot is updated in place.
+    """
+    candidates = [
+        entry
+        for entry in (snap.get("codex") or {}).get("homes") or []
+        if entry.get("verdict") == "auth-suspect"
+        and codex.probe_looks_token_expired(entry.get("probe") or {})
+    ]
+    if not candidates:
+        return []
+
+    now = now_local()
+    refresh_fn = refresh_fn or codex.refresh_via_cli
+    reprobe_fn = reprobe_fn or _reprobe_home
+    auth_reader = auth_reader or codex.read_auth
+    events: list[dict] = []
+    verdicts_changed = False
+    claimed: list[dict] = []
+
+    if dry_run:
+        for entry in candidates:
+            print(
+                f"[dry-run] would refresh-probe {_short(entry['home'])} "
+                "(expired access token)",
+                file=sys.stderr,
+            )
+        return []
+
+    try:
+        with _refresh_state_guard():
+            state = _refresh_state()
+            state_changed = False
+            for entry in candidates:
+                home = entry["home"]
+                previous = state.get(home) or {}
+                if not isinstance(previous, dict):
+                    previous = {}
+
+                if (
+                    previous.get("result") == "revoked"
+                    and previous.get("auth_last_refresh") == entry.get("auth_last_refresh")
+                ):
+                    entry["verdict"] = "auth-revoked"
+                    entry["refresh_probe"] = {**previous, "latched": True}
+                    verdicts_changed = True
+                    continue
+
+                last_attempt = parse_iso(previous.get("attempted_at"))
+                if last_attempt and now - last_attempt < timedelta(
+                    minutes=REFRESH_PROBE_SPACING_MIN
+                ):
+                    entry["refresh_probe"] = previous
+                    continue
+
+                if not _auth_still_matches(entry, auth_reader):
+                    entry["refresh_probe"] = {
+                        "attempted_at": iso(now),
+                        "result": "skipped-auth-changed",
+                        "detail": "auth changed after snapshot; refresh suppressed",
+                    }
+                    continue
+
+                claim = {
+                    "attempted_at": iso(now),
+                    "result": "in-progress",
+                    "lease_id": secrets.token_hex(16),
+                    "auth_last_refresh": entry.get("auth_last_refresh"),
+                    "detail": "vendor refresh probe claimed",
+                }
+                state[home] = claim
+                entry["refresh_probe"] = claim
+                claimed.append(entry)
+                state_changed = True
+            if state_changed:
+                atomic_write_json(paths.refresh_probes_path(), state)
+    except OSError as exc:
+        print(f"carpool: refresh probe suppressed: cannot claim state ({exc})", file=sys.stderr)
+        return []
+
+    for entry in claimed:
+        home = entry["home"]
+        lease_id = str((entry.get("refresh_probe") or {}).get("lease_id") or "")
+        if not lease_id or not _refresh_claim_owned(home, lease_id):
+            continue
+        if not _auth_still_matches(entry, auth_reader):
+            skipped = {
+                "attempted_at": iso(now),
+                "result": "skipped-auth-changed",
+                "auth_last_refresh": entry.get("auth_last_refresh"),
+                "detail": "auth changed after refresh claim; command suppressed",
+            }
+            entry["refresh_probe"] = skipped
+            try:
+                _store_refresh_state(home, skipped, lease_id=lease_id)
+            except OSError:
+                pass
+            continue
+        attempt = refresh_fn(home)
+        detail = str(attempt.get("detail") or "").strip()
+        if attempt.get("status") == "revoked":
+            result = "revoked"
+            entry["verdict"] = "auth-revoked"
+        else:
+            # CLI startup may refresh successfully even if the tiny turn later
+            # fails (for example because the account is at its usage limit).
+            fresh = reprobe_fn(home)
+            auth = fresh.get("auth") or {}
+            probe = fresh.get("probe") or {}
+            observed = fresh.get("observed")
+            if probe.get("status") in ("ok", "token-revoked"):
+                verdict = snapshot.codex_verdict(auth, probe, observed)
+                entry["probe"] = {
+                    key: value
+                    for key, value in probe.items()
+                    if not str(key).startswith("_")
+                }
+                entry["windows"] = snapshot.effective_windows(probe, observed)
+                entry["rollout_observed"] = observed
+                entry["verdict"] = verdict
+                entry["email"] = auth.get("email") or probe.get("email") or entry.get("email")
+                entry["plan"] = probe.get("plan_type") or auth.get("plan") or entry.get("plan")
+                entry["auth_last_refresh"] = (
+                    auth.get("last_refresh") or entry.get("auth_last_refresh")
+                )
+                # A successful auth refresh can legitimately reveal a
+                # non-dispatchable free plan. Only the provider's explicit
+                # revocation verdict is a revoked credential.
+                if verdict == "auth-revoked":
+                    result = "revoked"
+                    detail = str(probe.get("error") or detail)
+                elif verdict in ("ok", "limited", "free-plan"):
+                    result = "healed"
+                else:
+                    result = "failed"
+                    detail = (
+                        f"exec rc={attempt.get('rc')}; usage re-probe returned "
+                        f"{verdict}"
+                    )
+            else:
+                result = "failed"
+                exec_note = f"exec rc={attempt.get('rc')}"
+                if detail:
+                    exec_note += f" ({detail})"
+                reprobe_note = (
+                    f"usage re-probe {probe.get('status') or '?'} "
+                    f"{probe.get('error') or ''}"
+                ).strip()
+                detail = f"{exec_note}; {reprobe_note}"
+
+        attempted_at = iso(now)
+        entry["refresh_probe"] = {
+            "attempted_at": attempted_at,
+            "result": result,
+            "rc": attempt.get("rc"),
+            "detail": detail,
+        }
+        persisted = {
+            "attempted_at": attempted_at,
+            "result": result,
+            "auth_last_refresh": entry.get("auth_last_refresh"),
+            "detail": detail[:200],
+        }
+        try:
+            persisted_result = _store_refresh_state(
+                home, persisted, lease_id=lease_id
+            )
+        except OSError as exc:
+            print(
+                f"carpool: warning: could not persist refresh result for {_short(home)}: {exc}",
+                file=sys.stderr,
+            )
+            persisted_result = False
+        if not persisted_result:
+            print(
+                f"carpool: refresh result for {_short(home)} not persisted "
+                "because this process no longer owns the claim",
+                file=sys.stderr,
+            )
+        verdicts_changed = verdicts_changed or result in ("healed", "revoked")
+        events.append({"home": home, "result": result, "detail": detail})
+        print(
+            f"carpool: refresh probe {_short(home)}: {result}"
+            + (f" ({detail})" if detail else ""),
+            file=sys.stderr,
+        )
+
+    if verdicts_changed:
+        codex_section = snap.get("codex") or {}
+        codex_section["fleet"] = _recount_codex_fleet(
+            codex_section.get("homes") or [],
+            parse_iso(snap.get("generated_at")) or now,
+        )
+    return events
 
 
 def evaluate_conditions(snap: dict) -> list[dict]:
@@ -67,32 +400,66 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 }
             )
         if e["verdict"] == "auth-revoked":
+            via_refresh_probe = (e.get("refresh_probe") or {}).get("result") == "revoked"
+            if via_refresh_probe:
+                severity = "critical"
+                cause = (
+                    "hit 'refresh token was revoked' during the watchdog's vendor-CLI "
+                    "refresh probe. The lane is dead until re-login, and no further "
+                    "refresh probes will run until its auth timestamp changes.\n"
+                )
+            else:
+                severity = "warn"
+                cause = (
+                    "returned 401 token_revoked on the usage endpoint.\n"
+                    "A provider revocation is never auto-healed.\n"
+                )
             conditions.append(
                 {
                     "key": f"codex-revoked:{e['home']}",
-                    "severity": "warn",
+                    "severity": severity,
                     "subject": f"codex auth: {_short(e['home'])} token revoked",
                     "body": (
                         f"{_short(e['home'])} ({e.get('email') or e.get('account_id', '?')}) "
-                        "returned 401 token_revoked on the usage endpoint.\n"
-                        "Next codex run there will try a token refresh; if it fails with "
-                        "'refresh token was revoked', the home is dead until re-login.\n"
-                        f"Heal: CODEX_HOME={_short(e['home'])} codex login\n"
-                        "One login at a time (port 1455); pick a DISTINCT account per home."
+                        f"{cause}"
+                        f"Heal: {_login_command(e['home'])} (guided codex login)\n"
+                        "Pick a distinct account for each lane."
                     ),
                 }
             )
         elif e["verdict"] == "auth-suspect":
+            probe_line = (
+                f"{_short(e['home'])} usage probe: {e['probe'].get('status')} "
+                f"{e['probe'].get('error', '')}"
+            ).rstrip()
+            attempt = e.get("refresh_probe") or {}
+            if attempt.get("result") == "failed":
+                body = (
+                    f"{probe_line}\n"
+                    "Automatic vendor-CLI refresh probe failed: "
+                    f"{attempt.get('detail') or 'no output'}.\n"
+                    "It may retry after the probe-spacing window; only a revoked "
+                    "refresh token is definitive.\n"
+                    f"If this persists, run `{_login_command(e['home'])}`."
+                )
+            elif codex.probe_looks_token_expired(e.get("probe") or {}):
+                body = (
+                    f"{probe_line}\n"
+                    "The stored access token expired. On the next live cycle the "
+                    "watchdog will let the vendor CLI perform one refresh and then "
+                    "re-probe usage."
+                )
+            else:
+                body = (
+                    f"{probe_line}\nLocal auth.json looks fine — watch for 401s; "
+                    "if persistent, re-login that lane."
+                )
             conditions.append(
                 {
                     "key": f"codex-suspect:{e['home']}",
                     "severity": "warn",
                     "subject": f"codex auth: {_short(e['home'])} probe failing",
-                    "body": (
-                        f"{_short(e['home'])} usage probe: {e['probe'].get('status')} "
-                        f"{e['probe'].get('error', '')}\nLocal auth.json looks fine — "
-                        "watch for 401s; if persistent, re-login that home."
-                    ),
+                    "body": body,
                 }
             )
         if e["recent_errors"]["auth_revoked"]:
@@ -272,6 +639,9 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None) -> d
     """One watchdog cycle. Returns a summary dict (also printed by the CLI)."""
     now = now_local()
     snap = snap or snapshot.build(live=live)
+    # Heal before persistence and alert evaluation so every downstream view
+    # sees the post-refresh verdict and fleet count.
+    refresh_events = heal_expired_codex_homes(snap, dry_run=dry_run)
     state_dir = paths.state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -334,7 +704,7 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None) -> d
             continue
         if key.startswith(
             ("codex-revoked:", "codex-refresh-revoked:", "codex-noauth:", "codex-dup:",
-             "codex-fleet-empty", "codex-free-plan:", "claude-lane-auth:",
+             "codex-suspect:", "codex-fleet-empty", "codex-free-plan:", "claude-lane-auth:",
              "claude-lanes-empty", "cc-mirror-stalled")
         ) and not _same_home_still_bad(key):
             _notify(f"✅ recovered: {key}", "Condition no longer present.", dry_run)
@@ -349,4 +719,6 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None) -> d
         "conditions": [c["key"] for c in conditions],
         "alerts_sent": sent,
         "recovered": recovered,
+        "refresh_probes": refresh_events,
+        "healed": [event["home"] for event in refresh_events if event["result"] == "healed"],
     }
