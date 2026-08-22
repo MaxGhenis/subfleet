@@ -250,13 +250,9 @@ REFRESH_PROBE_MODEL = "gpt-5.6-terra"
 REFRESH_PROBE_PROMPT = "Reply with exactly: ok"
 
 
-def _codex_binary() -> str:
-    """Resolve the real CLI even when a scheduler provides a minimal PATH."""
+def _codex_binary() -> str | None:
+    """Resolve the real CLI without ever returning carpool's PATH shim."""
     import shutil
-
-    override = os.environ.get("CARPOOL_CODEX_BIN")
-    if override:
-        return override
 
     repository_shim = (Path(__file__).resolve().parent.parent / "bin" / "codex").resolve()
 
@@ -277,6 +273,10 @@ def _codex_binary() -> str:
             return None
         return str(path)
 
+    override = os.environ.get("CARPOOL_CODEX_BIN")
+    if override:
+        return usable(override)
+
     home = Path.home()
     for candidate in (
         home / ".bun" / "bin" / "codex",
@@ -288,7 +288,7 @@ def _codex_binary() -> str:
         resolved = usable(candidate)
         if resolved:
             return resolved
-    return "codex"
+    return None
 
 
 def refresh_via_cli(
@@ -298,8 +298,15 @@ def refresh_via_cli(
     runner=subprocess.run,
 ) -> dict:
     """Let the vendor CLI refresh and persist its own token atomically."""
+    binary = _codex_binary()
+    if not binary:
+        return {
+            "status": "failed",
+            "rc": None,
+            "detail": "real Codex binary not found",
+        }
     command = [
-        _codex_binary(),
+        binary,
         "exec",
         "-m",
         model,

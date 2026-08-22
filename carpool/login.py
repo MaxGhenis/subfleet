@@ -241,6 +241,9 @@ def codex_login(
     _secure_truncate(log)
     env = {**os.environ, "CODEX_HOME": str(home)}
     binary = codex_bin or _codex_binary()
+    if not binary:
+        print("carpool login: real Codex binary not found", file=sys.stderr)
+        return 1
     try:
         with log.open("ab") as stream:
             process = subprocess.Popen(

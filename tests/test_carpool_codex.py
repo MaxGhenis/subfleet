@@ -34,6 +34,21 @@ def test_codex_binary_resolves_known_location_without_path(tmp_path, monkeypatch
     assert codex._codex_binary() == str(binary)
 
 
+def test_codex_binary_fails_closed_without_real_binary(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "empty-home"))
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr(Path, "is_file", lambda _self: False)
+    monkeypatch.delenv("CARPOOL_CODEX_BIN", raising=False)
+
+    assert codex._codex_binary() is None
+
+
+def test_codex_binary_rejects_the_path_shim_as_an_override(monkeypatch):
+    monkeypatch.setenv("CARPOOL_CODEX_BIN", str(SHIM))
+
+    assert codex._codex_binary() is None
+
+
 def test_runner_auto_picks_and_repicks_after_usage_limit(tmp_path):
     fake_codex = _executable(
         tmp_path / "real-codex",
@@ -273,3 +288,57 @@ def test_path_shim_respects_autopick_opt_out(tmp_path):
 
     assert completed.returncode == 0
     assert (tmp_path / "home").read_text() == ""
+
+
+@pytest.mark.parametrize("pick_mode", ["failure", "missing-directory"])
+def test_path_shim_fails_closed_when_pick_is_unusable(tmp_path, pick_mode):
+    marker = tmp_path / "vendor-ran"
+    real = _executable(
+        tmp_path / "real-codex",
+        "#!/usr/bin/env bash\ntouch \"$VENDOR_MARKER\"\n",
+    )
+    fake_carpool = _executable(
+        tmp_path / "carpool",
+        """#!/usr/bin/env bash
+if [ "$1" = _codex-binary ]; then printf '%s\n' "$REAL_CODEX_PATH"; exit 0; fi
+if [ "$1" = pick ]; then
+  [ "$PICK_MODE" != failure ] || exit 3
+  printf '%s\n' "$MISSING_LANE"
+  exit 0
+fi
+exit 1
+""",
+    )
+    env = {
+        **os.environ,
+        "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+        "REAL_CODEX_PATH": str(real),
+        "PICK_MODE": pick_mode,
+        "MISSING_LANE": str(tmp_path / "not-a-lane"),
+        "VENDOR_MARKER": str(marker),
+    }
+    env.pop("CODEX_HOME", None)
+    env.pop("CARPOOL_NO_AUTOPICK", None)
+
+    completed = subprocess.run(
+        [str(SHIM), "exec", "task"], env=env, text=True, capture_output=True
+    )
+
+    assert completed.returncode == 1
+    assert not marker.exists()
+    assert "refusing to use the desktop app home" in completed.stderr
+
+
+def test_path_shim_does_not_recurse_when_binary_resolution_fails(tmp_path):
+    fake_carpool = _executable(tmp_path / "carpool", "#!/bin/sh\nexit 1\n")
+    env = {
+        **os.environ,
+        "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+    }
+
+    completed = subprocess.run(
+        [str(SHIM), "exec"], env=env, text=True, capture_output=True, timeout=5
+    )
+
+    assert completed.returncode == 127
+    assert "real codex binary not found" in completed.stderr

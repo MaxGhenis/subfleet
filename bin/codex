@@ -21,11 +21,16 @@ fi
 case "${1:-}" in
   exec|e|review)
     if [ -z "${CODEX_HOME:-}" ] && [ -z "${CARPOOL_NO_AUTOPICK:-}" ]; then
-      pick=$("$CARPOOL" pick codex 2>/dev/null) || pick=""
-      if [ -n "$pick" ] && [ -d "$pick" ]; then
-        export CODEX_HOME="$pick"
-        echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or CARPOOL_NO_AUTOPICK=1 to opt out)" >&2
+      if ! pick=$("$CARPOOL" pick codex 2>/dev/null); then
+        echo "codex-shim: no dispatchable Codex lane; refusing to use the desktop app home" >&2
+        exit 1
       fi
+      if [ -z "$pick" ] || [ ! -d "$pick" ]; then
+        echo "codex-shim: picker returned no usable lane; refusing to use the desktop app home" >&2
+        exit 1
+      fi
+      export CODEX_HOME="$pick"
+      echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or CARPOOL_NO_AUTOPICK=1 to opt out)" >&2
     fi
     ;;
 esac

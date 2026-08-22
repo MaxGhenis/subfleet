@@ -36,6 +36,7 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Added a strictly gated vendor-CLI refresh probe for expired Codex access tokens, with locked renewable leases, pre-command auth revalidation, a 20-minute retry interval, post-refresh re-probe, dry-run safety, and definitive revocation latching until re-login changes the auth timestamp.
 - Recomputed and persisted the healed snapshot before alert evaluation so auth recovery and fleet capacity are visible in the same watchdog cycle.
 - Closed the legacy account-report probe path so stored Claude setup tokens remain inference-only outside the explicit one-time enrollment validation.
+- Made Codex binary resolution and the PATH shim fail closed when no real vendor binary or dispatchable numbered lane exists, preventing accidental desktop-app dispatch and shim recursion.
 - Kept the expanded suite green (`352 passed in 22.28s`).
 
 ## Next

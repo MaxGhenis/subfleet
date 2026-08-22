@@ -393,7 +393,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     "body": (
                         f"{_short(e['home'])} has no auth.json — usually an aborted/incomplete "
                         "`codex login` (starting a login purges the old token immediately).\n"
-                        f"Heal: CODEX_HOME={_short(e['home'])} codex login\n"
+                        f"Heal: {_login_command(e['home'])}\n"
                         "Pick the account that home is supposed to hold; verify distinctness "
                         "afterward with: carpool status"
                     ),
@@ -472,7 +472,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     "body": (
                         f"A codex session in {_short(e['home'])} hit 'refresh token was revoked' "
                         f"(seen {seen}). That home is dead until re-login.\n"
-                        f"Heal: CODEX_HOME={_short(e['home'])} codex login\n"
+                        f"Heal: {_login_command(e['home'])}\n"
                         "Likely cause: the same account bound in two homes (one refresh revokes "
                         "the sibling). Verify configured homes hold distinct accounts afterward: carpool status"
                     ),
@@ -506,7 +506,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     f"Account {d['account_id'][:8]}… is bound in: "
                     + ", ".join(_short(h) for h in d["homes"])
                     + "\nWhichever refreshes first revokes the other. Re-login one of them "
-                    "to a distinct account: CODEX_HOME=<home> codex login"
+                    f"to a distinct account with `{_login_command(d['homes'][-1])}`."
                 ),
             }
         )
@@ -582,7 +582,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     "severity": "warn",
                     "subject": f"claude lane {lane['email']}: {lane['verdict']}",
                     "body": (
-                        f"Enrolled lane {lane['email']} failed its usage probe "
+                        f"Enrolled lane {lane['email']} has unusable credentials "
                         f"({lane['verdict']}) — headless dispatch to it will fail.\n"
                         f"Heal: claude setup-token   # sign into {lane['email']}\n"
                         f"                 carpool enroll {lane['email']}"

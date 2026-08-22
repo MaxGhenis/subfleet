@@ -5,6 +5,8 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from carpool import codex
 from carpool.util import parse_reset_clock
 
@@ -201,6 +203,10 @@ class TestTokenExpiredSignature:
 
 
 class TestRefreshViaCli:
+    @pytest.fixture(autouse=True)
+    def _resolved_binary(self, monkeypatch):
+        monkeypatch.setattr(codex, "_codex_binary", lambda: "/tools/codex-real")
+
     @staticmethod
     def result(rc=0, stdout="", stderr=""):
         return subprocess.CompletedProcess([], rc, stdout, stderr)
@@ -245,6 +251,20 @@ class TestRefreshViaCli:
             raise subprocess.TimeoutExpired(command, 1)
 
         assert codex.refresh_via_cli(tmp_path, runner=timeout)["status"] == "failed"
+
+    def test_missing_binary_is_a_soft_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(codex, "_codex_binary", lambda: None)
+
+        def must_not_run(*args, **kwargs):
+            raise AssertionError("no command should run without a resolved vendor binary")
+
+        result = codex.refresh_via_cli(tmp_path, runner=must_not_run)
+
+        assert result == {
+            "status": "failed",
+            "rc": None,
+            "detail": "real Codex binary not found",
+        }
 
 
 class TestResetClock:

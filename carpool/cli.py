@@ -439,7 +439,11 @@ def cmd_secret(args) -> int:
 
 def cmd_codex_binary(_args) -> int:
     """Internal bridge for shell entrypoints that cannot assume a rich PATH."""
-    print(codex._codex_binary())
+    binary = codex._codex_binary()
+    if not binary:
+        print("carpool: real Codex binary not found", file=sys.stderr)
+        return 1
+    print(binary)
     return 0
 
 
