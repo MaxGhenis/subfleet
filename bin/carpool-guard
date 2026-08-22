@@ -1,0 +1,433 @@
+#!/bin/bash
+# Build, inspect, and verify the Codex hook override used by carpool.
+#
+# Usage:
+#   carpool-guard check [--hook <absolute-path>] [--tool <name>] <command|-> [cwd]
+#   carpool-guard hash [--hook <absolute-path>] [--timeout <seconds>]
+#                      [--matcher <matcher>] [--status <message>]
+#   carpool-guard override [--hook <absolute-path>] [--timeout <seconds>]
+#                          [--matcher <matcher>] [--status <message>]
+#   carpool-guard key
+#   carpool-guard preflight -H <codex-home> -C <workdir> [--codex <binary>]
+#                            [--no-cache] [common override options]
+#
+# `preflight` asks the local Codex app-server to list the configured hook and
+# requires it to be both enabled and trusted. It probes a scratch CODEX_HOME
+# seeded only with config.toml and hooks.json; lane credentials are never read
+# or copied. Successful checks are cached by Codex version, binary, hook
+# identity, lane path, and configuration fingerprint.
+#
+# Environment overrides:
+#   CARPOOL_GUARD_HOOK                 default hook path
+#   CARPOOL_GUARD_TIMEOUT              hook timeout (default 60)
+#   CARPOOL_GUARD_MATCHER              hook matcher (default Bash)
+#   CARPOOL_GUARD_STATUS               hook status message
+#   CARPOOL_CODEX_BINARY               binary used by preflight
+#   CARPOOL_GUARD_CACHE                preflight cache directory
+#   CARPOOL_GUARD_PREFLIGHT_TIMEOUT    app-server deadline (default 60 seconds)
+#
+# Bash 3.2 compatible. Usage errors exit 2.
+set -u
+export LC_ALL=C
+
+SELF=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+HOOK=${CARPOOL_GUARD_HOOK:-$HERE/carpool-guard-hook}
+TIMEOUT=${CARPOOL_GUARD_TIMEOUT:-60}
+MATCHER=${CARPOOL_GUARD_MATCHER:-Bash}
+STATUS_MSG=${CARPOOL_GUARD_STATUS:-carpool safety guard}
+KEY='/<session-flags>/config.toml:pre_tool_use:0:0'
+SEED_FILES="config.toml hooks.json"
+CODEX_HOME_ARG=""
+WORKDIR=""
+CODEX_BIN_ARG="${CARPOOL_CODEX_BINARY:-}"
+NO_CACHE=""
+JQ=""
+
+usage() {
+  sed -n '/^# Usage:/,/^# Bash 3.2/p' "$SELF" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+need_jq() {
+  if [ -n "$JQ" ] && [ -x "$JQ" ]; then return 0; fi
+  if [ -n "${CARPOOL_JQ:-}" ] && [ -x "$CARPOOL_JQ" ]; then
+    JQ=$CARPOOL_JQ
+    return 0
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    JQ=$(command -v jq)
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/jq /usr/bin/jq; do
+    if [ -x "$candidate" ]; then JQ=$candidate; return 0; fi
+  done
+  echo "carpool-guard: jq not found" >&2
+  exit 1
+}
+
+sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | sed 's/^.*= //'
+  else
+    echo "carpool-guard: no SHA-256 utility found" >&2
+    return 1
+  fi
+}
+
+toml_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Codex executes hook command strings through a shell. Keep the same quoted
+# command in both the TOML override and the normalized identity hash.
+shell_quote() {
+  case "$1" in
+    *[![:alnum:]@%+=:,./_-]*|'')
+      printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+hook_command() { shell_quote "$HOOK"; }
+
+compute_hash() {
+  local identity digest
+  identity=$("$JQ" -cnS --arg command "$(hook_command)" \
+    --argjson timeout "$TIMEOUT" --arg matcher "$MATCHER" \
+    --arg status "$STATUS_MSG" \
+    '{event_name:"pre_tool_use",matcher:$matcher,hooks:[{type:"command",command:$command,timeout:$timeout,async:false,statusMessage:$status}]}') \
+    || return 1
+  digest=$(printf '%s' "$identity" | sha256_stream) || return 1
+  printf 'sha256:%s' "$digest"
+}
+
+build_override() {
+  local hash command_escaped matcher_escaped status_escaped
+  hash=$(compute_hash) || return 1
+  command_escaped=$(toml_escape "$(hook_command)")
+  matcher_escaped=$(toml_escape "$MATCHER")
+  status_escaped=$(toml_escape "$STATUS_MSG")
+  printf 'hooks={PreToolUse=[{matcher="%s",hooks=[{type="command",command="%s",timeout=%s,statusMessage="%s"}]}],state={"%s"={trusted_hash="%s",enabled=true}}}' \
+    "$matcher_escaped" "$command_escaped" "$TIMEOUT" "$status_escaped" \
+    "$KEY" "$hash"
+}
+
+validate_common() {
+  case "$TIMEOUT" in
+    ''|*[!0-9]*|0)
+      echo "carpool-guard: timeout must be a positive integer" >&2
+      exit 2 ;;
+  esac
+  case "$HOOK" in
+    /*) ;;
+    *) echo "carpool-guard: hook path must be absolute" >&2; exit 2 ;;
+  esac
+  case "$MATCHER" in
+    ''|*[!A-Za-z0-9_|]*)
+      echo "carpool-guard: matcher must contain only letters, digits, _, or |" >&2
+      exit 2 ;;
+  esac
+  if printf '%s' "$STATUS_MSG" | grep -q '[[:cntrl:]]'; then
+    echo "carpool-guard: status message must be one line" >&2
+    exit 2
+  fi
+}
+
+parse_common() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hook) [ $# -ge 2 ] || usage; HOOK=$2; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || usage; TIMEOUT=$2; shift 2 ;;
+      --matcher) [ $# -ge 2 ] || usage; MATCHER=$2; shift 2 ;;
+      --status) [ $# -ge 2 ] || usage; STATUS_MSG=$2; shift 2 ;;
+      -H) [ $# -ge 2 ] || usage; CODEX_HOME_ARG=$2; shift 2 ;;
+      -C) [ $# -ge 2 ] || usage; WORKDIR=$2; shift 2 ;;
+      --codex) [ $# -ge 2 ] || usage; CODEX_BIN_ARG=$2; shift 2 ;;
+      --no-cache) NO_CACHE=1; shift ;;
+      *) usage ;;
+    esac
+  done
+  validate_common
+}
+
+cmd_check() {
+  local tool_name="Bash" command cwd payload output decision reason
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hook) [ $# -ge 2 ] || usage; HOOK=$2; shift 2 ;;
+      --tool) [ $# -ge 2 ] || usage; tool_name=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  [ $# -ge 1 ] && [ $# -le 2 ] || usage
+  validate_common
+  need_jq
+  command=$1
+  cwd=${2:-$PWD}
+  [ "$command" = "-" ] && command=$(cat)
+  [ -x "$HOOK" ] || {
+    echo "carpool-guard: hook is not executable: $HOOK" >&2
+    exit 1
+  }
+  payload=$("$JQ" -cn --arg cwd "$cwd" --arg command "$command" \
+    --arg tool "$tool_name" \
+    '{session_id:"carpool-guard-check",turn_id:"carpool-guard-check",tool_use_id:"carpool-guard-check",hook_event_name:"PreToolUse",permission_mode:"never",tool_name:$tool,cwd:$cwd,tool_input:{command:$command}}') \
+    || exit 1
+  output=$(printf '%s' "$payload" | CARPOOL_GUARD_LOG="" "$HOOK")
+  if [ -z "$output" ]; then
+    echo "allow"
+    exit 0
+  fi
+  decision=$(printf '%s' "$output" | "$JQ" -r \
+    '.hookSpecificOutput.permissionDecision // .decision // empty' 2>/dev/null) \
+    || decision=""
+  reason=$(printf '%s' "$output" | "$JQ" -r \
+    '.hookSpecificOutput.permissionDecisionReason // .reason // empty' 2>/dev/null) \
+    || reason=""
+  case "$decision" in
+    deny|block) echo "deny: $reason"; exit 1 ;;
+    *) echo "allow"; exit 0 ;;
+  esac
+}
+
+seed_fingerprint() {
+  local file
+  {
+    for file in $SEED_FILES; do
+      if [ -f "$1/$file" ]; then
+        printf '%s\n' "$file"
+        cat "$1/$file"
+        printf '\n'
+      fi
+    done
+  } 2>/dev/null | sha256_stream
+}
+
+resolve_codex() {
+  local resolved
+  if [ -n "$CODEX_BIN_ARG" ]; then
+    case "$CODEX_BIN_ARG" in
+      */*) resolved=$CODEX_BIN_ARG ;;
+      *) resolved=$(command -v "$CODEX_BIN_ARG" 2>/dev/null) || resolved="" ;;
+    esac
+  else
+    resolved=$(command -v codex 2>/dev/null) || resolved=""
+  fi
+  [ -n "$resolved" ] && [ -x "$resolved" ] || {
+    echo "preflight: codex binary not found or not executable" >&2
+    exit 1
+  }
+  case "$resolved" in
+    /*) ;;
+    *) resolved="$PWD/$resolved" ;;
+  esac
+  CODEX_BIN_ARG=$resolved
+}
+
+pid_alive() {
+  local process_id
+  process_id=$(cat "$1" 2>/dev/null) || process_id=""
+  [ -n "$process_id" ] && kill -0 "$process_id" 2>/dev/null
+}
+
+kill_tree() {
+  local process_id=$1 children="" child
+  if command -v pgrep >/dev/null 2>&1; then
+    children=$(pgrep -P "$process_id" 2>/dev/null | tr '\n' ' ')
+  fi
+  kill -TERM "$process_id" 2>/dev/null || true
+  for child in $children; do kill -TERM "$child" 2>/dev/null || true; done
+  sleep 1
+  kill -KILL "$process_id" 2>/dev/null || true
+  for child in $children; do kill -KILL "$child" 2>/dev/null || true; done
+}
+
+cmd_preflight() {
+  local home workdir version override expected_hash config_hash cache_key
+  local cache_dir marker scratch flag pidfile deadline ticks file
+  local initialize initialized list_request response_line entry enabled trust
+  local current warnings errors line i
+  need_jq
+  [ -n "$CODEX_HOME_ARG" ] && [ -n "$WORKDIR" ] || usage
+  [ -x "$HOOK" ] || {
+    echo "preflight: hook is not executable: $HOOK" >&2
+    exit 1
+  }
+  home=$(cd "$CODEX_HOME_ARG" 2>/dev/null && pwd) || {
+    echo "preflight: codex home not found: $CODEX_HOME_ARG" >&2
+    exit 1
+  }
+  workdir=$(cd "$WORKDIR" 2>/dev/null && pwd) || {
+    echo "preflight: workdir not found: $WORKDIR" >&2
+    exit 1
+  }
+  resolve_codex
+  version=$("$CODEX_BIN_ARG" --version 2>/dev/null | head -1)
+  [ -n "$version" ] || {
+    echo "preflight: codex --version printed nothing" >&2
+    exit 1
+  }
+  deadline=${CARPOOL_GUARD_PREFLIGHT_TIMEOUT:-60}
+  case "$deadline" in
+    ''|*[!0-9]*|0)
+      echo "preflight: CARPOOL_GUARD_PREFLIGHT_TIMEOUT must be a positive integer" >&2
+      exit 1 ;;
+  esac
+
+  override=$(build_override) || {
+    echo "preflight: override generation failed" >&2
+    exit 1
+  }
+  expected_hash=$(compute_hash) || exit 1
+  config_hash=$(seed_fingerprint "$home") || exit 1
+  cache_key=$(printf '%s' "$CODEX_BIN_ARG|$version|$home|$override|$config_hash" \
+    | sha256_stream) || exit 1
+  cache_dir=${CARPOOL_GUARD_CACHE:-${CARPOOL_CODEX_GUARD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/carpool/guard}}
+  marker="$cache_dir/ok-$cache_key"
+  if [ -z "$NO_CACHE" ] && [ -f "$marker" ]; then
+    echo "preflight: cached ok ($version)"
+    exit 0
+  fi
+
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/carpool-guard-preflight.XXXXXX") || {
+    echo "preflight: could not create scratch directory" >&2
+    exit 1
+  }
+  flag="$scratch/done"
+  pidfile="$scratch/pid"
+  mkdir "$scratch/home" || {
+    echo "preflight: could not create scratch CODEX_HOME" >&2
+    rm -rf "$scratch"
+    exit 1
+  }
+  # Deliberately do not seed auth.json, session data, databases, or any other
+  # lane file. app-server is free to mutate this disposable home.
+  for file in $SEED_FILES; do
+    if [ -f "$home/$file" ]; then
+      cp "$home/$file" "$scratch/home/$file" 2>/dev/null || {
+        echo "preflight: could not copy $file into scratch CODEX_HOME" >&2
+        rm -rf "$scratch"
+        exit 1
+      }
+    fi
+  done
+
+  initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"carpool-guard-preflight","title":"carpool guard preflight","version":"1"}}}'
+  initialized='{"jsonrpc":"2.0","method":"initialized","params":{}}'
+  list_request=$("$JQ" -cn --arg cwd "$workdir" \
+    '{jsonrpc:"2.0",id:2,method:"hooks/list",params:{cwds:[$cwd]}}') || {
+    rm -rf "$scratch"
+    exit 1
+  }
+  ticks=$((deadline * 5))
+
+  # Bash 3.2 has no coproc. The writer keeps stdin open until the reader sees
+  # response id 2, then closes it so a healthy app-server exits. A bounded
+  # polling loop terminates a wedged process and its direct children.
+  {
+    trap '' PIPE
+    printf '%s\n' "$initialize" "$initialized" "$list_request"
+    i=0
+    while [ "$i" -lt "$ticks" ] && [ ! -f "$flag" ]; do
+      sleep 0.2
+      i=$((i + 1))
+    done
+    [ -f "$flag" ] || : > "$scratch/timeout"
+    exec >&-
+    if [ -f "$flag" ]; then
+      i=0
+      while [ "$i" -lt 25 ] && pid_alive "$pidfile"; do
+        sleep 0.2
+        i=$((i + 1))
+      done
+    fi
+    if pid_alive "$pidfile"; then kill_tree "$(cat "$pidfile")"; fi
+  } 2>/dev/null \
+    | CODEX_HOME="$scratch/home" /bin/sh -c \
+        'printf "%s\n" "$$" > "$0" && exec "$@"' "$pidfile" \
+        "$CODEX_BIN_ARG" app-server -c features.plugins=false -c "$override" \
+        2>"$scratch/stderr" \
+    | {
+        while IFS= read -r line; do
+          case "$line" in
+            *'"id":2'*)
+              if printf '%s' "$line" | "$JQ" -e '.id == 2' >/dev/null 2>&1; then
+                printf '%s\n' "$line" > "$scratch/response"
+                break
+              fi ;;
+          esac
+        done
+        : > "$flag"
+      }
+
+  if pid_alive "$pidfile"; then kill_tree "$(cat "$pidfile")"; fi
+  if [ ! -s "$scratch/response" ]; then
+    if [ -f "$scratch/timeout" ]; then
+      echo "preflight: FAILED - no hooks/list response within ${deadline}s ($version)" >&2
+    else
+      echo "preflight: FAILED - codex app-server exited without a hooks/list response ($version)" >&2
+    fi
+    if [ -s "$scratch/stderr" ]; then
+      echo "preflight: app-server stderr tail:" >&2
+      tail -5 "$scratch/stderr" >&2
+    fi
+    rm -rf "$scratch"
+    exit 1
+  fi
+
+  response_line=$(cat "$scratch/response")
+  warnings=$(printf '%s' "$response_line" | "$JQ" -r \
+    '(.result.data[0].warnings // []) | .[]' 2>/dev/null) || warnings=""
+  errors=$(printf '%s' "$response_line" | "$JQ" -r \
+    '(.result.data[0].errors // []) | .[]' 2>/dev/null) || errors=""
+  [ -n "$warnings" ] && printf 'preflight: hooks/list warning: %s\n' "$warnings" >&2
+  [ -n "$errors" ] && printf 'preflight: hooks/list error: %s\n' "$errors" >&2
+  entry=$(printf '%s' "$response_line" | "$JQ" -c --arg key "$KEY" \
+    '(.result.data[0].hooks // []) | map(select(.key == $key)) | .[0] // empty' \
+    2>/dev/null) || entry=""
+  if [ -z "$entry" ]; then
+    echo "preflight: FAILED - configured hook was not listed under $KEY ($version)" >&2
+    rm -rf "$scratch"
+    exit 1
+  fi
+  enabled=$(printf '%s' "$entry" | "$JQ" -r '.enabled // false')
+  trust=$(printf '%s' "$entry" | "$JQ" -r '.trustStatus // empty')
+  current=$(printf '%s' "$entry" | "$JQ" -r '.currentHash // empty')
+  rm -rf "$scratch"
+
+  if [ "$enabled" != "true" ] || [ "$trust" != "trusted" ] || \
+     { [ -n "$current" ] && [ "$current" != "$expected_hash" ]; }; then
+    echo "preflight: FAILED - hook enabled=$enabled trustStatus=$trust currentHash=$current expected=$expected_hash ($version)" >&2
+    exit 1
+  fi
+
+  if [ -z "$NO_CACHE" ]; then
+    mkdir -p "$cache_dir" 2>/dev/null || true
+    if printf 'version=%s\nbinary=%s\nhome=%s\nconfig=%s\ntrust=%s\n' \
+      "$version" "$CODEX_BIN_ARG" "$home" "$config_hash" "$expected_hash" \
+      > "$marker.tmp.$$" 2>/dev/null; then
+      mv -f "$marker.tmp.$$" "$marker" 2>/dev/null || rm -f "$marker.tmp.$$"
+    fi
+    find "$cache_dir" -maxdepth 1 -name 'ok-*' -type f -mtime +30 \
+      -exec rm -f {} + 2>/dev/null || true
+  fi
+  echo "preflight: ok ($version, trust=$(printf '%s' "$expected_hash" | cut -c8-19))"
+}
+
+[ $# -ge 1 ] || usage
+subcommand=$1
+shift
+case "$subcommand" in
+  check) cmd_check "$@" ;;
+  hash) parse_common "$@"; need_jq; compute_hash || exit 1; echo ;;
+  override) parse_common "$@"; need_jq; build_override || exit 1; echo ;;
+  key) [ $# -eq 0 ] || usage; printf '%s\n' "$KEY" ;;
+  preflight) parse_common "$@"; cmd_preflight ;;
+  -h|--help|help) usage ;;
+  *) usage ;;
+esac

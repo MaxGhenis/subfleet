@@ -1,0 +1,340 @@
+#!/bin/bash
+# Codex PreToolUse hook for portable, high-cost shell mistakes.
+#
+# Input is a Codex PreToolUse JSON object on stdin. A denial is returned as a
+# hookSpecificOutput object; every malformed or irrelevant input is allowed by
+# producing no stdout. This file intentionally contains no account or lane
+# authentication logic.
+set -u
+
+export LC_ALL=C
+export PATH="/usr/bin:/bin:${PATH:-/usr/sbin:/sbin}"
+: "${HOME:=/var/empty}"
+
+input=$(cat 2>/dev/null) || input=""
+
+JQ="${CARPOOL_JQ:-}"
+if [ -z "$JQ" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    JQ=$(command -v jq)
+  elif [ -x /opt/homebrew/bin/jq ]; then
+    JQ=/opt/homebrew/bin/jq
+  elif [ -x /usr/bin/jq ]; then
+    JQ=/usr/bin/jq
+  fi
+fi
+[ -n "$JQ" ] && [ -x "$JQ" ] || exit 0
+
+event=$(printf '%s' "$input" | "$JQ" -r \
+  '.hook_event_name // empty | if type == "string" then . else empty end' \
+  2>/dev/null) || exit 0
+[ "$event" = "PreToolUse" ] || exit 0
+
+tool=$(printf '%s' "$input" | "$JQ" -r \
+  '.tool_name // empty | if type == "string" then . else empty end' \
+  2>/dev/null) || exit 0
+[ "$tool" = "Bash" ] || exit 0
+
+command=$(printf '%s' "$input" | "$JQ" -r '
+  .tool_input.command // empty |
+  if type == "string" then .
+  elif type == "array" then map(tostring) | join(" ")
+  else empty end' 2>/dev/null) || exit 0
+[ -n "$command" ] || exit 0
+
+cwd=$(printf '%s' "$input" | "$JQ" -r \
+  '.cwd // empty | if type == "string" then . else empty end' \
+  2>/dev/null) || cwd=""
+
+deny() {
+  local reason=$1 log_file
+  log_file=${CARPOOL_GUARD_LOG:-}
+  if [ -n "$log_file" ]; then
+    {
+      mkdir -p "$(dirname "$log_file")" 2>/dev/null
+      printf '%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$cwd" \
+        "$(printf '%s' "$command" | tr '\t\r\n' '   ' | cut -c1-300)" \
+        >> "$log_file"
+    } 2>/dev/null || true
+  fi
+  "$JQ" -cn --arg reason "$reason" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+  exit 0
+}
+
+# Decrypted keychain dumps expose unrelated credentials and can trigger a
+# large authorization-prompt cascade. Narrow item lookups remain allowed.
+if printf '%s\n' "$command" | grep -Eq \
+  '(^|[;&|()][[:space:]]*)((sudo|command)[[:space:]]+)*(/usr/bin/)?security[[:space:]][^;&|]*dump-keychain[^;&|]*(^|[[:space:]])-d([[:space:]]|$|[;&|])'; then
+  deny "[keychain-dump] Refusing a decrypted keychain dump. Query a specific keychain item instead of exporting unrelated credentials."
+fi
+
+# The stash namespace belongs to the repository's common git directory, not
+# to one linked worktree. Permit `stash list` for recovery; deny every common
+# stash operation (including a bare `git stash`) when another worktree exists.
+if printf '%s\n' "$command" | grep -Eq \
+  '(^|[;&|()][[:space:]]*)((sudo|command)[[:space:]]+)*git[[:space:]]+([^;&|]*[[:space:]])?stash([[:space:]]*($|[;&|])|[[:space:]]+(-[^[:space:]]*|push|save|pop|apply|drop|clear|show|branch|create|store)([[:space:]]|$|[;&|]))'; then
+  worktree_count=$(git -C "$cwd" worktree list --porcelain 2>/dev/null \
+    | grep -c '^worktree ' | tr -d ' ') || worktree_count=0
+  case "$worktree_count" in ''|*[!0-9]*) worktree_count=0 ;; esac
+  if [ "$worktree_count" -gt 1 ]; then
+    deny "[stash-shared] Refusing git stash in a repository with linked worktrees. The stash stack is shared across every worktree; use a commit, patch, or explicit file restoration instead."
+  fi
+fi
+
+# If an origin default branch exists, a new branch should start from that
+# remote-tracking ref. Local main/master may be stale or contain other work.
+if printf '%s\n' "$command" | grep -Eq \
+  '(^|[;&|()][[:space:]]*)((sudo|command)[[:space:]]+)*git[[:space:]][^;&|]*(checkout[[:space:]]+-b|switch[[:space:]]+(-c|--create))[[:space:]]+'; then
+  remote_default=""
+  if git -C "$cwd" show-ref --verify --quiet refs/remotes/origin/main 2>/dev/null; then
+    remote_default=origin/main
+  elif git -C "$cwd" show-ref --verify --quiet refs/remotes/origin/master 2>/dev/null; then
+    remote_default=origin/master
+  fi
+  if [ -n "$remote_default" ]; then
+    local_start=""
+    if printf '%s\n' "$command" | grep -Eq \
+      '(checkout[[:space:]]+-b|switch[[:space:]]+(-c|--create))[[:space:]]+[^[:space:];&|]+[[:space:]]+(main|master)([[:space:]]|$|[;&|])'; then
+      local_start=1
+    elif printf '%s\n' "$command" | grep -Eq \
+      '(checkout[[:space:]]+-b|switch[[:space:]]+(-c|--create))[[:space:]]+[^[:space:];&|]+[[:space:]]*($|[;&|])'; then
+      current_branch=$(git -C "$cwd" branch --show-current 2>/dev/null) || current_branch=""
+      case "$current_branch" in main|master) local_start=1 ;; esac
+    fi
+    if [ -n "$local_start" ]; then
+      deny "[local-main] Refusing to create a branch from local main/master while $remote_default exists. Fetch and branch from the remote-tracking ref instead."
+    fi
+  fi
+fi
+
+# Tokenize shell text without evaluating it and identify broad search roots in
+# the argument positions used by find, ripgrep, and recursive grep. This is a
+# deliberately small shell lexer: quoted words remain single words, command
+# separators are recognized, and redirection destinations are ignored.
+search_hit=$(printf '%s\n' "$command" | awk -v START_CWD="$cwd" -v HOME_DIR="$HOME" '
+  function emit() {
+    if (word != "") { token[++count] = word; word = "" }
+  }
+  function op(value) { emit(); token[++count] = value }
+  function basename(path, value) {
+    value = path
+    sub(/^.*\//, "", value)
+    return value
+  }
+  function separator(value) {
+    return value == ";" || value == "&" || value == "&&" ||
+      value == "|" || value == "||" || value == "(" || value == ")"
+  }
+  function redirection(value) {
+    return value == "<" || value == ">" || value == "<<" || value == ">>"
+  }
+  function broad(path) {
+    if (path == "/" || path == "/*" || path == "/Users" || path == "/Users/" ||
+        path == "/Users/*" || path == "/home" || path == "/home/" ||
+        path == "/home/*" || path == "/tmp" || path == "/tmp/" ||
+        path == "/tmp/*" || path == "/private/tmp" || path == "/private/tmp/" ||
+        path == "/private/tmp/*" || path == "/var/tmp" || path == "/var/tmp/" ||
+        path == "/var/tmp/*" || path == "~" || path == "~/" || path == "~/*" ||
+        path == "$HOME" || path == "$HOME/" || path == "$HOME/*" ||
+        path == "${HOME}" || path == "${HOME}/" || path == "${HOME}/*") return 1
+    if (HOME_DIR != "" && (path == HOME_DIR || path == HOME_DIR "/" || path == HOME_DIR "/*")) return 1
+    if (path ~ /^\/Users\/[^\/[:space:]]+\/?$/ || path ~ /^\/home\/[^\/[:space:]]+\/?$/) return 1
+    return 0
+  }
+  function label(path) {
+    if (path == "." || path == "./") return ". (broad cwd)"
+    if (path == "~" || path == "~/" || path == "~/*" ||
+        path == "$HOME" || path == "$HOME/" || path == "$HOME/*" ||
+        path == "${HOME}" || path == "${HOME}/" || path == "${HOME}/*" ||
+        (HOME_DIR != "" && (path == HOME_DIR || path == HOME_DIR "/" || path == HOME_DIR "/*"))) return "<home>"
+    if (path ~ /^\/Users\/[^\/[:space:]]+\/?$/ || path ~ /^\/home\/[^\/[:space:]]+\/?$/) return "<user-home>"
+    return path
+  }
+  function broad_here(path) {
+    return (path == "." || path == "./") && broad(current_cwd)
+  }
+  function report(searcher, path) {
+    print searcher "|" label(path)
+    exit
+  }
+  function assignment(value) {
+    return value ~ /^[A-Za-z_][A-Za-z0-9_]*=/
+  }
+  function command_index(first, last, i, name) {
+    i = first
+    while (i <= last) {
+      if (assignment(token[i])) { i++; continue }
+      name = basename(token[i])
+      if (name == "sudo" || name == "command" || name == "builtin" ||
+          name == "nohup" || name == "time") {
+        i++
+        while (i <= last && token[i] ~ /^-/) i++
+        continue
+      }
+      if (name == "env") {
+        i++
+        while (i <= last && (token[i] ~ /^-/ || assignment(token[i]))) i++
+        continue
+      }
+      if (name == "timeout") {
+        i++
+        while (i <= last && token[i] ~ /^-/) i++
+        if (i <= last) i++
+        continue
+      }
+      if (name == "nice") {
+        i++
+        if (i <= last && token[i] == "-n") i += 2
+        else while (i <= last && token[i] ~ /^-[0-9]+$/) i++
+        continue
+      }
+      return i
+    }
+    return 0
+  }
+  function option_value(value) {
+    return value == "-e" || value == "-f" || value == "-g" ||
+      value == "-t" || value == "-T" || value == "-A" ||
+      value == "-B" || value == "-C" || value == "-m" ||
+      value == "-M" || value == "-j" || value == "-d" ||
+      value == "-D" || value == "--regexp" || value == "--file" ||
+      value == "--glob" || value == "--iglob" || value == "--type" ||
+      value == "--type-not" || value == "--max-count" ||
+      value == "--max-columns" || value == "--max-filesize" ||
+      value == "--context" || value == "--after-context" ||
+      value == "--before-context" || value == "--include" ||
+      value == "--exclude" || value == "--exclude-dir" ||
+      value == "--replace" || value == "--threads" ||
+      value == "--encoding" || value == "--sort" ||
+      value == "--sortr" || value == "--engine" ||
+      value == "--ignore-file" || value == "--max-depth"
+  }
+  function inspect_find(idx, last, j, saw_path) {
+    for (j = idx + 1; j <= last; j++)
+      if (token[j] == "-maxdepth" || token[j] == "--max-depth" ||
+          token[j] ~ /^--max-depth=/) return
+    saw_path = 0
+    for (j = idx + 1; j <= last; j++) {
+      if (redirection(token[j])) { j++; continue }
+      if (!saw_path && (token[j] == "-H" || token[j] == "-L" ||
+                        token[j] == "-P" || token[j] == "--")) continue
+      if (token[j] == "!" || token[j] == "(" || token[j] ~ /^-/) break
+      saw_path = 1
+      if (broad(token[j]) || broad_here(token[j])) report("find", token[j])
+    }
+    if (!saw_path && broad(current_cwd)) report("find", ".")
+  }
+  function inspect_text_search(name, idx, last, j, value, recursive,
+                               no_pattern, bounded, skip, stop_options,
+                               positional) {
+    recursive = (name == "rg")
+    no_pattern = 0
+    bounded = 0
+    for (j = idx + 1; j <= last; j++) {
+      value = token[j]
+      if (name == "grep" && value ~ /^-[^-]*[rR]/) recursive = 1
+      if (name == "grep" && (value == "--recursive" || value == "--dereference-recursive")) recursive = 1
+      if (value == "-e" || value == "-f" || value == "--regexp" ||
+          value == "--file" || value == "--files" || value ~ /^-e./ ||
+          value ~ /^-f./ || value ~ /^--regexp=/ || value ~ /^--file=/) no_pattern = 1
+      if (value == "--max-depth" || value ~ /^--max-depth=/) bounded = 1
+    }
+    if (!recursive || bounded) return
+    skip = 0
+    stop_options = 0
+    positional = 0
+    for (j = idx + 1; j <= last; j++) {
+      value = token[j]
+      if (redirection(value)) { j++; continue }
+      if (skip) { skip = 0; continue }
+      if (!stop_options && value == "--") { stop_options = 1; continue }
+      if (!stop_options && option_value(value)) { skip = 1; continue }
+      if (!stop_options && value ~ /^-/) continue
+      positional++
+      if ((no_pattern || positional > 1) && (broad(value) || broad_here(value)))
+        report(name == "rg" ? "rg" : "recursive grep", value)
+    }
+    if ((positional == 0 || (positional == 1 && !no_pattern)) && broad(current_cwd))
+      report(name == "rg" ? "rg" : "recursive grep", ".")
+  }
+  function inspect_segment(first, last, idx, name, arg) {
+    if (first > last) return
+    idx = command_index(first, last)
+    if (!idx) return
+    name = basename(token[idx])
+    if (name == "cd" || name == "pushd") {
+      idx++
+      while (idx <= last && (token[idx] ~ /^-/ || token[idx] == "--")) idx++
+      if (idx <= last) {
+        arg = token[idx]
+        if (broad(arg)) current_cwd = arg
+        else if (arg ~ /^\//) current_cwd = arg
+        else current_cwd = "<scoped>"
+      }
+      return
+    }
+    if (name == "find") inspect_find(idx, last)
+    else if (name == "rg" || name == "grep") inspect_text_search(name, idx, last)
+  }
+  {
+    source = source $0 "\n"
+  }
+  END {
+    state = "plain"
+    word = ""
+    count = 0
+    for (i = 1; i <= length(source); i++) {
+      char = substr(source, i, 1)
+      next_char = substr(source, i + 1, 1)
+      if (state == "single") {
+        if (char == "\047") state = "plain"; else word = word char
+        continue
+      }
+      if (state == "double") {
+        if (char == "\"") { state = "plain"; continue }
+        if (char == "\\" && (next_char == "\"" || next_char == "\\" ||
+                                next_char == "$" || next_char == "`")) {
+          word = word next_char; i++; continue
+        }
+        word = word char
+        continue
+      }
+      if (char == "\047") { state = "single"; continue }
+      if (char == "\"") { state = "double"; continue }
+      if (char == "\\") {
+        if (next_char == "\n") { i++; continue }
+        if (next_char != "") { word = word next_char; i++; continue }
+      }
+      if (char == "\n") { op(";"); continue }
+      if (char ~ /[ \t\r]/) { emit(); continue }
+      if (char == ";" || char == "(" || char == ")") { op(char); continue }
+      if (char == "&" || char == "|") {
+        if (next_char == char) { op(char next_char); i++ } else op(char)
+        continue
+      }
+      if (char == "<" || char == ">") {
+        if (next_char == char) { op(char next_char); i++ } else op(char)
+        continue
+      }
+      word = word char
+    }
+    emit()
+    current_cwd = START_CWD
+    first = 1
+    for (i = 1; i <= count + 1; i++) {
+      if (i == count + 1 || separator(token[i])) {
+        inspect_segment(first, i - 1)
+        first = i + 1
+      }
+    }
+  }
+' 2>/dev/null) || search_hit=""
+
+if [ -n "$search_hit" ]; then
+  searcher=${search_hit%%|*}
+  matched=${search_hit#*|}
+  deny "[unscoped-search] Refusing unbounded $searcher over a broad root ($matched). Search an exact subtree, use a depth bound, or enumerate repository files first."
+fi
+
+exit 0

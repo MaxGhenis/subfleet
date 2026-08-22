@@ -17,4 +17,5 @@ if [ ! -x "$PY" ]; then
 fi
 [ -n "$PY" ] || { echo "carpool: Python 3.12 or newer is required" >&2; exit 2; }
 
-cd "$ROOT" && exec "$PY" -m carpool.cli "$@"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m carpool.cli "$@"

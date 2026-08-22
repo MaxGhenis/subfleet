@@ -2,7 +2,7 @@
 
 ## State
 
-The public rename, topology/health behavior, and durable run-ledger core are complete. The next slice ports the re-login ritual through configured state and notifications, then the hardened auto-picking runners.
+The public rename, topology/health behavior, durable ledger, and hardened auto-picking runners are complete. The next slice wires the staged re-login ritual and remaining pass-through/status commands into the unified CLI.
 
 ## Done
 
@@ -22,8 +22,13 @@ The public rename, topology/health behavior, and durable run-ledger core are com
 - Added live in-flight counts as a same-capacity dispatch tie-break; better headroom always wins.
 - Exposed `carpool runs`, `carpool runs show`, and the private runner recording hook.
 - Kept the expanded suite green (`225 passed`).
+- Made `carpool codex -H` optional, added exclusion-aware selection and mid-run re-picking, resolved the real vendor binary without relying on a scheduler's PATH, and recorded every provider attempt.
+- Added the `bin/codex` auto-pick shim with `CARPOOL_NO_AUTOPICK`, while preserving explicit `CODEX_HOME` and interactive commands.
+- Ported the Claude auto-pick/re-pick runner through the public secret store, including lane usage/run ledgers, rc 4/5 classification, API-key scrubbing, safe detach/salvage handling, and served-model downgrade markers.
+- Added a generic Codex guard and live trust preflight for four portable high-risk command patterns; organization-specific policies were deliberately excluded.
+- Preserved caller working directories in the repository launcher and kept the combined suite green (`317 passed`).
 
 ## Next
 
-- Port `carpool login codex <N|app>` and its completion watcher through configured state, `notify.py`, and the unified CLI.
-- Port runner auto-pick/re-pick, the Codex PATH shim, and the generic guard.
+- Wire `carpool login codex <N|app>` and its completion watcher through the unified CLI.
+- Add `mirror` and `brief` routing, then commit the expired-token watchdog repair.

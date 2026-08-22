@@ -106,6 +106,7 @@ def _codex_env(fake_bin: Path, files: dict[str, Path]) -> dict[str, str]:
     return {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "CARPOOL_CODEX_GUARD": "off",
         "WRAPPER_ARGS": os.fspath(files["args"]),
         "WRAPPER_HOME": os.fspath(files["home"]),
         "WRAPPER_COUNT": os.fspath(files["count"]),
@@ -567,9 +568,9 @@ def test_wrapper_sources_retain_hardening_primitives():
         assert "GIT_INDEX_FILE" in source
         assert "update-ref" in source
         assert ref_namespace in source
-        assert "trap salvage EXIT" in source
-        assert "trap 'salvage; exit 130' INT" in source
-        assert "trap 'salvage; exit 143' TERM" in source
+        assert "trap on_exit EXIT" in source
+        assert "trap 'exit 130' INT" in source
+        assert "trap 'exit 143' TERM" in source
 
     assert "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN" in claude
     assert "MODEL-DOWNGRADE" in claude

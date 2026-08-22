@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# codex PATH shim — automatic carpool lane selection for headless commands.
+#
+# Interactive commands, explicit CODEX_HOME values, and callers setting
+# CARPOOL_NO_AUTOPICK pass through unchanged.
+set -uo pipefail
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+CARPOOL=${CARPOOL_SHIM_CARPOOL:-$SCRIPT_DIR/carpool}
+
+if [ -n "${CARPOOL_CODEX_BIN:-}" ]; then
+  REAL=$CARPOOL_CODEX_BIN
+else
+  REAL=$("$CARPOOL" _codex-binary 2>/dev/null) || REAL=""
+fi
+if [ -z "$REAL" ] || [ "$REAL" = "$0" ]; then
+  echo "codex-shim: real codex binary not found" >&2
+  exit 127
+fi
+
+case "${1:-}" in
+  exec|e|review)
+    if [ -z "${CODEX_HOME:-}" ] && [ -z "${CARPOOL_NO_AUTOPICK:-}" ]; then
+      pick=$("$CARPOOL" pick codex 2>/dev/null) || pick=""
+      if [ -n "$pick" ] && [ -d "$pick" ]; then
+        export CODEX_HOME="$pick"
+        echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or CARPOOL_NO_AUTOPICK=1 to opt out)" >&2
+      fi
+    fi
+    ;;
+esac
+
+exec "$REAL" "$@"

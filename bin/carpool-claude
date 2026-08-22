@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # carpool claude — hardened headless Claude Code dispatch pinned to an enrolled
-# account lane.
+# account lane. Auto mode selects a lane and immediately re-picks after a hard
+# account limit; pinned mode reports that condition with rc=4. Authentication
+# failures are rc=5, while unrelated raw provider exit codes 4/5 are normalized.
 #
-# It hardens four failure modes:
-#   1. Transient 5xx/429/capacity/network failures retry with backoff. Hard
-#      account limits repick immediately with -A or fail pinned runs with rc=4.
-#   2. Revoked or expired setup tokens fail immediately with rc=5.
-#   3. EXIT/INT/TERM snapshot dirty state to refs/claude-salvage/* through a
-#      temporary index and commit-tree without touching HEAD, the branch, the
-#      real index, or the worktree.
-#   4. The completed session transcript's per-message model field is checked
-#      for silent model downgrades. A mismatch emits a warning and creates a
-#      .DOWNGRADED marker beside the output.
+# Dirty work is snapshotted under refs/claude-salvage/* without moving HEAD or
+# the real index. Completed transcripts are checked for silent model changes,
+# and every run is offered to carpool's best-effort usage and durable ledgers.
 #
 # Usage:
 #   carpool claude -a <email> | -A -C <workdir> -p <prompt_file> -o <out_file> \
@@ -22,6 +17,20 @@
 # A salvage branch push fires on every exit, including success. For a public
 # remote, omit -b or use -R with a private recovery remote until work is reviewed.
 set -u
+
+# Follow repository-local symlinks so detached re-exec and sibling command
+# discovery stay attached to this checkout.
+SCRIPT_SOURCE=${BASH_SOURCE[0]}
+while [ -h "$SCRIPT_SOURCE" ]; do
+  SCRIPT_DIR=$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)
+  SCRIPT_SOURCE=$(readlink "$SCRIPT_SOURCE")
+  case "$SCRIPT_SOURCE" in
+    /*) ;;
+    *) SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE" ;;
+  esac
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)
+SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "$SCRIPT_SOURCE")"
 
 ORIG_ARGS=("$@")
 EMAIL="" AUTO=0 MODEL="claude-fable-5" WORKDIR="" PROMPT_FILE="" OUT_FILE=""
@@ -43,32 +52,52 @@ while getopts "a:Am:C:p:o:s:b:R:r:d" opt; do
   esac
 done
 
-# The environment handoff remains authoritative if an original `--` stopped
-# getopts before the launcher's final `-p` override.
-if [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] && [ -n "${CLAUDE_LANE_DETACHED_PROMPT:-}" ]; then
-  PROMPT_FILE=$CLAUDE_LANE_DETACHED_PROMPT
-fi
+DETACH_TMP_ROOT=${CLAUDE_LANE_TMPDIR:-${TMPDIR:-/tmp}}
+DETACH_TMP_ROOT=${DETACH_TMP_ROOT%/}
+DETACHED_CHILD=0
 
-cleanup_detached_prompt() {
-  local detached_prompt="${CLAUDE_LANE_DETACHED_PROMPT:-}"
-  [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] || return 0
-  [ -n "$detached_prompt" ] || return 0
-  [ "$PROMPT_FILE" = "$detached_prompt" ] || return 0
-  rm -f "$detached_prompt"
-  unset CLAUDE_LANE_DETACHED_PROMPT
+owned_prompt_shape() {
+  local candidate=$1
+  [ -n "$candidate" ] || return 1
+  [ "$(dirname -- "$candidate")" = "$DETACH_TMP_ROOT" ] || return 1
+  case "$(basename -- "$candidate")" in
+    carpool-claude-prompt.*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-# The detached child owns its private prompt copy. Install this before
-# validation so even an early child failure removes the handoff file; the full
-# salvage EXIT trap below takes over once setup completes.
-if [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] && [ -n "${CLAUDE_LANE_DETACHED_PROMPT:-}" ]; then
-  trap cleanup_detached_prompt EXIT
+cleanup_owned_prompt() {
+  local owned_prompt=${CLAUDE_LANE_OWNED_PROMPT:-}
+  [ "$DETACHED_CHILD" = 1 ] || return 0
+  if ! owned_prompt_shape "$owned_prompt"; then
+    echo "carpool claude: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
+    return 1
+  fi
+  if ! rm -f "$owned_prompt" || [ -e "$owned_prompt" ]; then
+    echo "carpool claude: WARNING could not remove owned prompt $owned_prompt" >&2
+    return 1
+  fi
+  unset CLAUDE_LANE_OWNED_PROMPT CLAUDE_LANE_DETACHED_PROMPT
+}
+
+# A detached child owns only the exact regular prompt copy named by the parent.
+# Installing this narrow trap before validation prevents leaks on early errors.
+if [ "$DETACH" = 1 ] \
+   && [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] \
+   && [ -n "${CLAUDE_LANE_OWNED_PROMPT:-}" ] \
+   && [ "$PROMPT_FILE" = "$CLAUDE_LANE_OWNED_PROMPT" ] \
+   && [ -f "$CLAUDE_LANE_OWNED_PROMPT" ] \
+   && owned_prompt_shape "$CLAUDE_LANE_OWNED_PROMPT"; then
+  DETACHED_CHILD=1
+  trap cleanup_owned_prompt EXIT
 fi
 
 [ -n "$EMAIL" ] || [ "$AUTO" = 1 ] || { echo "carpool claude: need -a <email> or -A" >&2; exit 2; }
+[ -z "$EMAIL" ] || [ "$AUTO" = 0 ] || { echo "carpool claude: -a and -A are mutually exclusive" >&2; exit 2; }
 [ -n "$WORKDIR" ] || { echo "carpool claude: missing -C <workdir>" >&2; exit 2; }
 [ -n "$PROMPT_FILE" ] || { echo "carpool claude: missing -p <prompt_file>" >&2; exit 2; }
 [ -n "$OUT_FILE" ] || { echo "carpool claude: missing -o <out_file>" >&2; exit 2; }
+ORIGINAL_OUT_FILE=${CARPOOL_RUN_ORIGINAL_OUT-$OUT_FILE}
 [ -d "$WORKDIR" ] || { echo "carpool claude: workdir not found: $WORKDIR" >&2; exit 2; }
 [ -f "$PROMPT_FILE" ] || { echo "carpool claude: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
 case "$SANDBOX" in
@@ -78,7 +107,6 @@ esac
 command -v jq >/dev/null || { echo "carpool claude: jq required" >&2; exit 2; }
 command -v uuidgen >/dev/null || { echo "carpool claude: uuidgen required" >&2; exit 2; }
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CLAUDE_BIN=${CLAUDE_LANE_CLAUDE:-claude}
 CARPOOL_BIN=${CLAUDE_LANE_CARPOOL:-$SCRIPT_DIR/carpool}
 if [ ! -x "$CARPOOL_BIN" ]; then
@@ -91,14 +119,50 @@ if [ -n "${CLAUDE_LANE_CLAUDE_MODEL:-}" ]; then
 fi
 CLAUDE_DIR=${CLAUDE_LANE_CLAUDE_DIR:-${CARPOOL_CLAUDE_DIR:-$HOME/.claude}}
 BACKOFF_BASE=${CLAUDE_LANE_BACKOFF:-60}
+EXCLUDED_LANES=()
+EXCLUDED_COUNT=0
+RUN_ID=""
+SID=""
+
+absolute_path() {
+  local dir base
+  dir=$(dirname "$1")
+  base=$(basename "$1")
+  dir=$(cd -P "$dir" >/dev/null 2>&1 && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+RESOLVED=$(cd -P "$WORKDIR" >/dev/null 2>&1 && pwd) \
+  || { echo "carpool claude: cannot resolve workdir: $WORKDIR" >&2; exit 2; }
+WORKDIR=$RESOLVED
+RESOLVED=$(absolute_path "$PROMPT_FILE") \
+  || { echo "carpool claude: cannot resolve prompt path: $PROMPT_FILE" >&2; exit 2; }
+PROMPT_FILE=$RESOLVED
+RESOLVED=$(absolute_path "$OUT_FILE") \
+  || { echo "carpool claude: output directory not found: $(dirname "$OUT_FILE")" >&2; exit 2; }
+OUT_FILE=$RESOLVED
 
 BASE="${OUT_FILE%.md}"
 ERR_FILE="$BASE.err.log"
 RAW_FILE="$BASE.result.json"
 LANE_LOG="$BASE.lane.log"
+DOWNGRADED_FILE="$BASE.DOWNGRADED"
 
-if [ "$DETACH" = 1 ] && [ -z "${CLAUDE_LANE_DETACHED:-}" ]; then
-  DETACHED_PROMPT=$(mktemp "${TMPDIR:-/tmp}/carpool claude-prompt.XXXXXX" 2>/dev/null) || {
+same_file() {
+  [ "$1" = "$2" ] || { [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]; }
+}
+ARTIFACTS=("$PROMPT_FILE" "$OUT_FILE" "$ERR_FILE" "$RAW_FILE" "$LANE_LOG" "$DOWNGRADED_FILE")
+for ((left = 0; left < ${#ARTIFACTS[@]}; left++)); do
+  for ((right = left + 1; right < ${#ARTIFACTS[@]}; right++)); do
+    if same_file "${ARTIFACTS[$left]}" "${ARTIFACTS[$right]}"; then
+      echo "carpool claude: prompt/output artifacts must not alias: ${ARTIFACTS[$left]} = ${ARTIFACTS[$right]}" >&2
+      exit 2
+    fi
+  done
+done
+
+if [ "$DETACH" = 1 ] && [ "$DETACHED_CHILD" = 0 ]; then
+  DETACHED_PROMPT=$(mktemp "$DETACH_TMP_ROOT/carpool-claude-prompt.XXXXXX" 2>/dev/null) || {
     echo "carpool claude: could not create a durable prompt copy for detached run" >&2
     exit 2
   }
@@ -108,8 +172,22 @@ if [ "$DETACH" = 1 ] && [ -z "${CLAUDE_LANE_DETACHED:-}" ]; then
     exit 2
   fi
   export CLAUDE_LANE_DETACHED=1
+  export CLAUDE_LANE_OWNED_PROMPT="$DETACHED_PROMPT"
+  # Kept for compatibility with callers that observe the detached handoff.
   export CLAUDE_LANE_DETACHED_PROMPT="$DETACHED_PROMPT"
-  nohup "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -p "$DETACHED_PROMPT" \
+  CHILD_ARGS=()
+  PROMPT_INSERTED=0
+  for arg in "${ORIG_ARGS[@]}"; do
+    if [ "$arg" = -- ] && [ "$PROMPT_INSERTED" = 0 ]; then
+      CHILD_ARGS+=(-p "$DETACHED_PROMPT")
+      PROMPT_INSERTED=1
+    fi
+    CHILD_ARGS+=("$arg")
+  done
+  # Also leave the override at the tail for launchers that inspect the handoff;
+  # the copy inserted before `--` is the one getopts consumes in that case.
+  CHILD_ARGS+=(-p "$DETACHED_PROMPT")
+  nohup "$SCRIPT_SOURCE" "${CHILD_ARGS[@]}" \
     </dev/null >>"$LANE_LOG" 2>&1 &
   pid=$!
   disown "$pid" 2>/dev/null || true
@@ -118,7 +196,6 @@ if [ "$DETACH" = 1 ] && [ -z "${CLAUDE_LANE_DETACHED:-}" ]; then
 fi
 
 salvage() {
-  cleanup_detached_prompt
   git -C "$WORKDIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
   local salvage_sha=""
   if [ -n "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
@@ -153,20 +230,103 @@ salvage() {
       && echo "carpool claude: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
   fi
 }
-trap salvage EXIT
-trap 'salvage; exit 130' INT
-trap 'salvage; exit 143' TERM
+
+record_run_start() {
+  local record_args
+  [ -n "$CARPOOL_BIN" ] || return 0
+  record_args=(
+    _record-run --phase start --family claude --model "$MODEL"
+    --lane "$EMAIL" --workdir "$WORKDIR" --prompt "$PROMPT_FILE"
+    --out "$OUT_FILE" --err "$ERR_FILE" --original-out "$ORIGINAL_OUT_FILE"
+  )
+  [ "$DETACHED_CHILD" = 0 ] || record_args+=(--lane-log "$LANE_LOG")
+  RUN_ID=$("$CARPOOL_BIN" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+}
+
+record_run_lane() {
+  [ -n "$RUN_ID" ] || return 0
+  "$CARPOOL_BIN" _record-run --phase update --run-id "$RUN_ID" \
+    --lane "$EMAIL" >/dev/null 2>&1 || true
+}
+
+record_run_finish() {
+  local final_rc=$1 transcript=""
+  local record_args
+  [ -n "$RUN_ID" ] || return 0
+  record_args=(
+    _record-run --phase finish --run-id "$RUN_ID" --lane "$EMAIL" --rc "$final_rc"
+  )
+  if [ -n "$SID" ]; then
+    record_args+=(--session-id "$SID")
+    transcript=$(transcript_path)
+    [ ! -f "$transcript" ] || record_args+=(--transcript-path "$transcript")
+  fi
+  "$CARPOOL_BIN" "${record_args[@]}" >/dev/null 2>&1 || true
+}
+
+on_exit() {
+  local final_rc=$?
+  trap - EXIT
+  # Never let the private detached prompt enter a salvage ref or remote push.
+  if ! cleanup_owned_prompt; then
+    echo "carpool claude: WARNING skipping salvage and push to protect the detached prompt" >&2
+  else
+    salvage
+  fi
+  record_run_finish "$final_rc"
+  exit "$final_rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$DETACHED_CHILD" = 1 ] && [ -n "${CLAUDE_LANE_DETACHED_START_DELAY:-}" ]; then
+  sleep "$CLAUDE_LANE_DETACHED_START_DELAY"
+fi
+
+lane_is_excluded() {
+  local candidate=$1 excluded
+  [ "$EXCLUDED_COUNT" -gt 0 ] || return 1
+  for excluded in "${EXCLUDED_LANES[@]}"; do
+    [ "$candidate" = "$excluded" ] && return 0
+  done
+  return 1
+}
+
+exclude_lane() {
+  if ! lane_is_excluded "$1"; then
+    EXCLUDED_LANES[EXCLUDED_COUNT]=$1
+    EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
+  fi
+}
 
 pick_lane() {
-  local picked
-  if [ -n "$CLAUDE_PICK" ]; then
-    picked=$("$CLAUDE_PICK") || return 1
-  else
-    [ -n "$CARPOOL_BIN" ] || return 1
-    picked=$("$CARPOOL_BIN" pick claude) || return 1
-  fi
-  [ -n "$picked" ] || return 1
-  EMAIL=$picked
+  local picked excluded tries=0
+  local pick_args
+  [ -n "$CARPOOL_BIN" ] || [ -n "$CLAUDE_PICK" ] || return 1
+  while [ "$tries" -lt 32 ]; do
+    tries=$((tries + 1))
+    if [ -n "$CLAUDE_PICK" ]; then
+      # Compatibility pickers may not accept exclusions. Re-invoke a stateful
+      # picker until it yields a candidate this run has not rejected.
+      picked=$("$CLAUDE_PICK") || return 1
+    else
+      pick_args=(pick claude)
+      if [ "$EXCLUDED_COUNT" -gt 0 ]; then
+        for excluded in "${EXCLUDED_LANES[@]}"; do
+          pick_args+=(--exclude "$excluded")
+        done
+      fi
+      picked=$("$CARPOOL_BIN" "${pick_args[@]}") || return 1
+    fi
+    [ -n "$picked" ] || return 1
+    if ! lane_is_excluded "$picked"; then
+      EMAIL=$picked
+      record_run_lane
+      return 0
+    fi
+  done
+  return 1
 }
 
 fetch_token() {
@@ -183,6 +343,17 @@ fetch_token() {
   fi
 }
 
+pick_lane_with_token() {
+  local tries=0
+  while [ "$tries" -lt 32 ]; do
+    tries=$((tries + 1))
+    pick_lane || return 1
+    fetch_token && return 0
+    exclude_lane "$EMAIL"
+  done
+  return 1
+}
+
 transcript_path() {
   local project_key
   project_key=$( (cd "$WORKDIR" && printf '%s' "$PWD" | tr '/.' '--') )
@@ -191,6 +362,7 @@ transcript_path() {
 
 record_lane_usage() {
   local transcript
+  [ -n "$CARPOOL_BIN" ] || return 0
   transcript=$(transcript_path)
   "$CARPOOL_BIN" lane-usage record --email "$EMAIL" --session-id "$SID" \
     --transcript "$transcript" >/dev/null 2>&1 || true
@@ -200,6 +372,7 @@ record_hard_limit() {
   local reset
   local args=(lane-usage hard-limit --email "$EMAIL" --session-id "$SID" \
     --error-file "$ERR_FILE")
+  [ -n "$CARPOOL_BIN" ] || return 0
   [ -s "$RAW_FILE" ] && args+=(--error-file "$RAW_FILE")
   reset=$("$CARPOOL_BIN" "${args[@]}" 2>/dev/null || true)
   if [ -n "$reset" ]; then
@@ -254,14 +427,25 @@ check_model() {
         echo "carpool claude: MODEL-DOWNGRADE — lane served $latest, requested $MODEL (classifier fallback)."
         echo "carpool claude: treat judgment or writing output as unverified and re-check it before use."
         printf '%s\n' "$report"
-      } | tee "$BASE.DOWNGRADED" >&2 ;;
+      } | tee "$DOWNGRADED_FILE" >&2 ;;
   esac
 }
 
+record_run_start
+unset CARPOOL_RUN_DECISION_JSON CARPOOL_RUN_ORIGINAL_OUT CARPOOL_RUN_LANE_LOG
+
 if [ "$AUTO" = 1 ] && [ -z "$EMAIL" ]; then
-  pick_lane || { echo "carpool claude: no dispatchable lane" >&2; exit 1; }
+  pick_lane_with_token || {
+    echo "carpool claude: no dispatchable lane with a usable stored token" >&2
+    exit 1
+  }
+else
+  fetch_token || exit 5
 fi
-fetch_token || exit 2
+
+# The marker describes the current output only. A new attempt invalidates both
+# an old output and its downgrade warning.
+rm -f "$DOWNGRADED_FILE"
 
 attempt=0
 while :; do
@@ -275,7 +459,10 @@ while :; do
     cd "$WORKDIR" || exit 97
     # Pin subscription OAuth and prevent accidental API-meter billing.
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-    CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" exec "$CLAUDE_BIN" -p --model "$MODEL" \
+    CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" exec env \
+      -u CLAUDE_LANE_DETACHED -u CLAUDE_LANE_OWNED_PROMPT \
+      -u CLAUDE_LANE_DETACHED_PROMPT \
+      "$CLAUDE_BIN" -p --model "$MODEL" \
       --session-id "$SID" --output-format json ${PERM_ARGS[@]+"${PERM_ARGS[@]}"}
   ) <"$PROMPT_FILE" >"$RAW_FILE" 2>"$ERR_FILE"
   rc=$?
@@ -301,21 +488,22 @@ while :; do
     echo "carpool claude: then run carpool enroll $EMAIL" >&2
     exit 5
   fi
-  if grep -qiE "usage limit|session limit|weekly limit|5-hour limit|limit reached|out of extra usage" \
+  if grep -qiE "usage limit|session limit|weekly limit|5-hour limit|subscription limit|out of extra usage" \
       ${ERRTXT[@]+"${ERRTXT[@]}"}; then
     record_hard_limit
-    if [ "$AUTO" = 1 ] && [ $attempt -le $MAX_RETRIES ]; then
+    if [ "$AUTO" = 1 ] && [ "$attempt" -le "$MAX_RETRIES" ]; then
       OLD_EMAIL=$EMAIL
+      exclude_lane "$OLD_EMAIL"
       echo "carpool claude: lane $OLD_EMAIL hit a hard limit; re-picking (attempt $attempt/$MAX_RETRIES)" >&2
-      if pick_lane && [ "$EMAIL" != "$OLD_EMAIL" ] && fetch_token; then
+      if pick_lane_with_token; then
         continue
       fi
       echo "carpool claude: no alternate lane available" >&2
     fi
-    echo "carpool claude: LANE LIMITED (rc=$rc) — re-dispatch with -A or wait for the reset (claude-pick --json --all)." >&2
+    echo "carpool claude: LANE LIMITED (rc=$rc) — re-dispatch with carpool claude -A or wait for the reset (carpool pick claude --json --all)." >&2
     exit 4
   fi
-  if [ $attempt -le $MAX_RETRIES ] && grep -qiE \
+  if [ "$attempt" -le "$MAX_RETRIES" ] && grep -qiE \
       "rate limit|too many requests|429|overloaded|capacity|disconnect|connection|ECONN|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529" \
       ${ERRTXT[@]+"${ERRTXT[@]}"}; then
     wait_s=$((BACKOFF_BASE * attempt))
@@ -327,5 +515,6 @@ while :; do
   tail -3 "$ERR_FILE" >&2
   [ -s "$RAW_FILE" ] && jq -r '.result // empty' "$RAW_FILE" 2>/dev/null | tail -2 >&2
   [ "$rc" -eq 0 ] && rc=1
+  case "$rc" in 4|5) rc=1 ;; esac
   exit "$rc"
 done

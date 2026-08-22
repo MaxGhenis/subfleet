@@ -257,19 +257,37 @@ def _codex_binary() -> str:
     override = os.environ.get("CARPOOL_CODEX_BIN")
     if override:
         return override
-    found = shutil.which("codex")
-    if found:
-        return found
+
+    repository_shim = (Path(__file__).resolve().parent.parent / "bin" / "codex").resolve()
+
+    def usable(candidate: Path | str | None) -> str | None:
+        if not candidate:
+            return None
+        path = Path(candidate).expanduser()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            return None
+        try:
+            if path.resolve() == repository_shim:
+                return None
+            # Installed copies of our PATH shim must not resolve back to
+            # themselves and recurse forever.
+            if "codex PATH shim" in path.read_text(errors="ignore")[:512]:
+                return None
+        except OSError:
+            return None
+        return str(path)
+
     home = Path.home()
     for candidate in (
         home / ".bun" / "bin" / "codex",
         home / ".bun" / "install" / "global" / "node_modules" / ".bin" / "codex",
-        home / "bin" / "codex",
+        shutil.which("codex"),
         Path("/opt/homebrew/bin/codex"),
         Path("/usr/local/bin/codex"),
     ):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        resolved = usable(candidate)
+        if resolved:
+            return resolved
     return "codex"
 
 

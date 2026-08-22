@@ -166,6 +166,9 @@ def cmd_pick(args) -> int:
     ranked = snapshot.rank_for_dispatch(
         snap["codex"]["homes"], handicap=handicap, min_headroom=args.min_headroom
     )
+    requested_exclusions = {str(home) for home in args.exclude if home}
+    if requested_exclusions:
+        ranked = [row for row in ranked if str(row["home"]) not in requested_exclusions]
     if args.json:
         out = {
             "generated_at": snap["generated_at"],
@@ -174,7 +177,9 @@ def cmd_pick(args) -> int:
             "excluded": [
                 {
                     "home": e["home"],
-                    "verdict": e["verdict"],
+                    "verdict": (
+                        "excluded" if str(e["home"]) in requested_exclusions else e["verdict"]
+                    ),
                     "duplicate_of": e.get("duplicate_of"),
                     "five_hour_used_percent": (e["windows"].get("primary") or {}).get("used_percent"),
                 }
@@ -227,16 +232,25 @@ def cmd_claude_pick(args) -> int:
     handicap = 0.0 if args.no_handicap else args.handicap
     ranked = claude.rank_lanes(rows, handicap=handicap, min_headroom=args.min_headroom)
     fleet = claude.lanes_fleet(rows, handicap=handicap, min_headroom=args.min_headroom)
+    requested_exclusions = {str(email) for email in args.exclude if email}
+    excluded = [
+        {"email": lane["email"], "verdict": lane["verdict"], "reset_at": lane.get("reset_at")}
+        for lane in fleet["lanes"]
+        if lane["verdict"] != "ok"
+    ]
+    if requested_exclusions:
+        excluded.extend(
+            {"email": row["email"], "verdict": "excluded", "reset_at": None}
+            for row in ranked
+            if str(row["email"]) in requested_exclusions
+        )
+        ranked = [row for row in ranked if str(row["email"]) not in requested_exclusions]
     if args.json:
         out = {
             "generated_at": generated_at,
             "best": ranked[0]["email"] if ranked else None,
             "ranked": ranked if args.all else ranked[:1],
-            "excluded": [
-                {"email": l["email"], "verdict": l["verdict"], "reset_at": l.get("reset_at")}
-                for l in fleet["lanes"]
-                if l["verdict"] != "ok"
-            ],
+            "excluded": excluded,
             "enrolled": fleet["enrolled"],
             "earliest_reset": fleet["earliest_reset"],
         }
@@ -250,9 +264,7 @@ def cmd_claude_pick(args) -> int:
                 file=sys.stderr,
             )
         else:
-            blocked = "; ".join(
-                f"{l['email']} {l['verdict']}" for l in fleet["lanes"] if l["verdict"] != "ok"
-            )
+            blocked = "; ".join(f"{lane['email']} {lane['verdict']}" for lane in excluded)
             print(
                 "carpool pick claude: no dispatchable claude lane"
                 + (f" (earliest reset {fleet['earliest_reset']})" if fleet.get("earliest_reset") else "")
@@ -368,6 +380,12 @@ def cmd_secret(args) -> int:
         print(f"carpool secret: item unavailable for {args.email}", file=sys.stderr)
         return 1
     print(value)
+    return 0
+
+
+def cmd_codex_binary(_args) -> int:
+    """Internal bridge for shell entrypoints that cannot assume a rich PATH."""
+    print(codex._codex_binary())
     return 0
 
 
@@ -503,9 +521,10 @@ def main(argv=None) -> int:
     p_pick.add_argument("--min-headroom", type=float, default=None,
                         help="minimum headroom %% to qualify (default 5)")
     p_pick.add_argument("--handicap", type=float, default=10.0,
-                        help="score penalty for the primary home ~/.codex (default 10)")
+                        help="score penalty for a lane sharing the desktop app account (default 10)")
     p_pick.add_argument("--no-handicap", action="store_true",
                         help="rank purely by usage (may burn the primary account's window)")
+    p_pick.add_argument("--exclude", action="append", default=[], help=argparse.SUPPRESS)
 
     for name, help_ in (
         ("run", "capacity-aware delegate router"),
@@ -528,6 +547,8 @@ def main(argv=None) -> int:
     p_secret = sub.add_parser("secret", help=argparse.SUPPRESS)
     p_secret.add_argument("action", choices=("get-for-account",))
     p_secret.add_argument("email")
+
+    sub.add_parser("_codex-binary", help=argparse.SUPPRESS)
 
     p_usage = sub.add_parser("lane-usage", help=argparse.SUPPRESS)
     usage_sub = p_usage.add_subparsers(dest="action", required=True)
@@ -562,7 +583,7 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     known = {
         "status", "capacity", "runs", "pick", "run", "codex", "claude", "errors",
-        "watch", "enroll", "secret", "lane-usage", "_record-run",
+        "watch", "enroll", "secret", "lane-usage", "_codex-binary", "_record-run",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
@@ -595,6 +616,7 @@ def main(argv=None) -> int:
         "enroll": cmd_enroll,
         "secret": cmd_secret,
         "lane-usage": cmd_lane_usage,
+        "_codex-binary": cmd_codex_binary,
         "_record-run": cmd_record_run,
     }
     return handlers[args.command](args)
