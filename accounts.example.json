@@ -1,5 +1,5 @@
 {
-  "_comment": "accounts lists the roster; enrolled maps emails to secret items. codex_homes null discovers numeric ~/.codex-N lanes; ~/.codex is observed separately as the desktop app home and is never dispatched. Commands are argv prefixes, never shell expressions.",
+  "_comment": "accounts lists the roster; enrolled maps reserved example emails to secret items. codex_homes null discovers numeric ~/.codex-N lanes; ~/.codex is observed separately as the desktop app home and is never dispatched. Commands are argv prefixes, never shell expressions.",
   "enrolled": {
     "user1@example.com": "claude-quota-user1@example.com"
   },
@@ -15,5 +15,7 @@
   "notify_cmd": null,
   "mirror_heartbeat": "~/.claude/cc-mirror-state.json",
   "mirror_job_label": null,
-  "mirror_restart_cmd": null
+  "mirror_restart_cmd": null,
+  "login_browser_cmd": null,
+  "login_refresh_cmd": null
 }

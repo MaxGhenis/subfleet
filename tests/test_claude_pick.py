@@ -1,4 +1,4 @@
-"""Lane ranking (claude-pick): pure ranking, fleet summary, CLI, watchdog and
+"""Claude lane ranking: pure ranking, fleet summary, CLI, watchdog and
 render wiring. All probes are mocked — no network, no keychain."""
 
 import json
@@ -13,7 +13,7 @@ from carpool.util import iso, now_local
 
 def lane_row(email, fh=None, wk=None, enrolled=True, active=False, status="ok",
              fh_reset=None, wk_reset=None):
-    """An accounts_report row with a mocked oauth/usage probe."""
+    """A synthetic row for the legacy pure ranking helpers."""
     row = {"email": email, "active": active, "enrolled": enrolled}
     if not enrolled:
         return row

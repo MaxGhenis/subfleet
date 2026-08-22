@@ -147,7 +147,7 @@ def _reset_from_text(text: str) -> str | None:
 
 
 def cmd_lane_usage(args) -> int:
-    """Internal, best-effort bridge used by claude-lane."""
+    """Internal, best-effort bridge used by ``carpool claude``."""
     try:
         if args.action == "record":
             capacity.append_lane_usage(
@@ -575,7 +575,7 @@ def main(argv=None) -> int:
     p_pick.add_argument("--min-headroom", type=float, default=None,
                         help="minimum headroom %% to qualify (default 5)")
     p_pick.add_argument("--handicap", type=float, default=10.0,
-                        help="score penalty for a lane sharing the desktop app account (default 10)")
+                        help="score penalty for the account active in the desktop app (default 10)")
     p_pick.add_argument("--no-handicap", action="store_true",
                         help="rank purely by usage (may burn the primary account's window)")
     p_pick.add_argument("--exclude", action="append", default=[], help=argparse.SUPPRESS)

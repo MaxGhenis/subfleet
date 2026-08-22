@@ -199,7 +199,7 @@ def session_mirror_health(
 
 
 # ---------------------------------------------------------------------------
-# Lane ranking (claude-pick). A "lane" is an enrolled account: its setup-token
+# Legacy lane-ranking helpers. A "lane" is an enrolled account: its setup token
 # lets a headless worker pin identity via CLAUDE_CODE_OAUTH_TOKEN, so dispatch
 # routes around the active login's limits instead of rotating logins.
 # ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ def _lane_reset_at(row: dict, min_headroom: float) -> str | None:
 
 def rank_lanes(rows: list[dict], handicap: float = ACTIVE_HANDICAP,
                min_headroom: float = DEFAULT_MIN_HEADROOM) -> list[dict]:
-    """Order dispatchable lanes best-first (claude-pick core). Mirrors the
+    """Order dispatchable lanes best-first. Mirrors the
     codex rank: gate on headroom, score by usage, and handicap the account
     backing the active desktop login so agent dispatch spares it. The score is
     the WORST window's usage — a lane 80% through its week ranks behind a lane

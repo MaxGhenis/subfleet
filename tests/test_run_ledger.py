@@ -54,7 +54,7 @@ def test_record_run_copies_artifacts_and_finalizes_all_metadata(
     run_id = run_ledger.start_run(
         family="claude",
         model="claude-model",
-        lane="claude-lane-a",
+        lane="lane-a@example.com",
         workdir=repo,
         prompt=prompt,
         out=out,
@@ -84,7 +84,7 @@ def test_record_run_copies_artifacts_and_finalizes_all_metadata(
     run_ledger.finish_run(
         run_id,
         rc=7,
-        lane="claude-lane-a",
+        lane="lane-a@example.com",
         session_id="session-1",
         finished="2026-08-22T10:00:05+00:00",
     )
@@ -92,7 +92,7 @@ def test_record_run_copies_artifacts_and_finalizes_all_metadata(
     meta = json.loads((run_dir / "meta.json").read_text())
     assert meta["family"] == "claude"
     assert meta["model"] == "claude-model"
-    assert meta["lane"] == "claude-lane-a"
+    assert meta["lane"] == "lane-a@example.com"
     assert meta["workdir"] == str(repo)
     assert meta["git_head_before"] == meta["git_head_after"] == head
     assert meta["rc"] == 7

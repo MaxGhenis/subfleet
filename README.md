@@ -1,124 +1,205 @@
 # carpool
 
-> Formerly `ai-lanes`. The unified `carpool` behavior port is in progress.
+Formerly `ai-lanes`.
 
-Run agentic AI work across multiple subscription accounts without rotating logins.
+carpool runs agentic work across several Claude Code and Codex subscriptions
+without repeatedly replacing one login. Each subscription gets a lane, the
+router selects a lane with usable capacity, and the hardened runners can move
+to another lane when a provider reports a limit.
 
-If you use Claude Code and Codex on consumer subscriptions, capacity comes in
-per-account windows. When one account hits a limit, the usual move is logging
-out and back in as another — which kills running agents and eats your time.
-carpool replaces login rotation with *lanes*: each account's identity lives in
-a token, workers pin an identity per process, and a router picks lanes for you.
-
-## What's in the box
-
-| tool | what it does |
-|------|--------------|
-| `delegate` | One entry point for dispatching agent work. Classifies the prompt (fable / review / build / sweep), picks a model family and an account with headroom, injects standing orders, and shells to the hardened runners below. `--why` explains routing and capacity decisions; `--dry-run` shows the command without running it. |
-| `ai-lanes` | Quota/auth monitor across all lanes, including `capacity [--json]` for a cross-family 5h + weekly view, observed limit events, and alerting via a configurable `notify_cmd`. |
-| `codex-pick` | Prints the best `CODEX_HOME` right now (distinct-account and rate-window aware). |
-| `claude-pick` | Prints the best enrolled Claude lane for direct wrapper use. |
-| `codex-run` | Hardened `codex exec`: retries transient deaths, fixes the worktree sandbox-git failure, snapshots uncommitted work to `refs/codex-salvage/*` on any exit, supports `-e <effort>`. |
-| `claude-lane` | Hardened headless `claude` pinned to a lane via `CLAUDE_CODE_OAUTH_TOKEN`: retries transients, records transcript token usage, fails fast on hard limits (rc 4) and dead tokens (rc 5), salvages to `refs/claude-salvage/*`, and checks the transcript afterward for silent model substitution. |
-
-Runtime is stdlib-only Python. macOS keychain is the default secret store; any
-command that speaks `get`/`set`/`del` can replace it in config.
+The Python package has no runtime dependencies outside the standard library.
+The shell runners expect Python 3.12 or newer; the Claude runner also uses
+`jq` and `uuidgen`. The default secret store is the macOS keychain, but a
+portable secret-store command can be configured.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/MaxGhenis/ai-lanes && cd ai-lanes
-mkdir -p ~/.config/ai-lanes
-cp accounts.example.json ~/.config/ai-lanes/accounts.json  # edit with your accounts
+uv sync
+mkdir -p ~/.config/carpool
+cp accounts.example.json ~/.config/carpool/accounts.json
 export PATH="$PWD/bin:$PATH"
+carpool status
 ```
 
-Enroll a Claude lane (one browser approval per account, once):
+Edit `~/.config/carpool/accounts.json` before enrolling or dispatching. The
+committed [accounts.example.json](accounts.example.json) contains only reserved
+example addresses and documents the supported public settings.
+
+## Lanes
+
+Codex keeps one login per home directory:
+
+- `~/.codex` is the desktop app's home. carpool observes its account and live
+  capacity, but never treats it as a dispatch lane.
+- `~/.codex-1`, `~/.codex-2`, and so on are dispatch lanes. They are discovered
+  automatically unless `codex_homes` or `CARPOOL_CODEX_HOMES` supplies an
+  explicit list.
+- A numbered lane bound to the desktop app's current account is *shadowed*.
+  It remains visible but receives a dispatch handicap, and the watchdog warns
+  only when the shadow state changes.
+- A Codex account reporting the free plan is excluded from dispatch.
+
+Log into a numbered lane or the separately observed app home with:
 
 ```bash
-claude setup-token   # sign into the TARGET account in the browser, approve
-# store the printed token under the configured secret prefix, e.g.:
-security add-generic-password -a agent -s claude-quota-you@example.com -w 'sk-ant-oat01-...'
-# then verify the lane actually serves inference:
-CLAUDE_CODE_OAUTH_TOKEN=... claude -p "Reply with exactly: LANE-OK" --model haiku
+carpool login codex 1
+carpool login codex app
 ```
 
-Codex lanes are `CODEX_HOME` directories, one per ChatGPT account
-(`codex login` inside each; never bind one account to two homes — token
-refresh in one revokes the other).
+The command starts the vendor login server in that home, opens its authorization
+URL, and arms a detached watcher. On completion, the watcher checks that
+numbered lanes contain distinct accounts, reports app shadows, refreshes the
+snapshot, and uses the configured notification hook. `--no-open` prints the
+URL; `--no-watch` skips the completion watcher.
 
-Dispatch:
+Claude lanes are the addresses in `accounts`, mapped to secret-store items by
+`enrolled`. Create and store a setup token without placing it in argv or an
+environment variable:
 
 ```bash
-delegate "Fix the failing retry test"                    # → build → codex lane, ultra effort
-delegate "Review and assess this diff"                   # → review → Sol, read-only audit
-delegate "Final review and launch verdict"               # → fable floor → Claude, read-only
-delegate "For each of the 40 files, verify the header"   # → sweep → cheap codex model
-delegate -m fable -a you@example.com -C ~/proj -p task.md -o out.md   # full override
-ai-lanes capacity                                        # human cross-family table
-ai-lanes capacity --json                                 # machine-readable view
+claude setup-token | carpool enroll user1@example.com
 ```
 
-## Routing rules
+Enrollment makes a one-time validation request and accepts the authorization
+responses expected from an inference-only setup token. Routine status and
+dispatch never use stored setup tokens as quota-observation credentials.
+Instead, the Claude runner records transcript token totals in a private local
+ledger and learns cooldowns from actual hard-limit responses.
 
-Classification is deliberate, transparent regex — not a model call — so every
-route is explainable and testable:
+## Commands
 
-- **fable floor** (`as max`; voice/email/blog/essay/prose; adjudication,
-  verdict, final review, merge gate, launch/send; design/strategy/wdyt) → Claude,
-  read-only by default. Any fable signal wins over every other class.
-- **review** (review, assess, critique, audit, evaluate, referee) → Sol,
-  read-only, with a defensive correctness-and-completeness audit preamble.
-- **sweep** (per-item mechanical verification at scale) → the cheap fast model.
-- **build** (everything else) → the strong codex model at max reasoning
-  effort, workspace-write, behind whatever tests and gates your prompt sets.
+| Command | Purpose |
+| --- | --- |
+| `carpool status [--json] [--cached]` | Show account identity, quota, authentication, shadow, and health state. With no subcommand, `status` is the default. |
+| `carpool capacity [--json]` | Normalize five-hour and weekly headroom across both providers. |
+| `carpool pick codex` | Print the best dispatchable Codex home. |
+| `carpool pick claude` | Print the best enrolled Claude address. |
+| `carpool run` | Classify a task, select a provider and lane, and invoke a hardened runner. |
+| `carpool codex` | Run hardened `codex exec`; `-H` is optional and omitted lanes are selected automatically. |
+| `carpool claude` | Run hardened headless Claude Code with `-A` auto-selection or `-a EMAIL` pinning. |
+| `carpool login codex N\|app` | Perform the Codex re-login ritual for one numbered lane or the app home. |
+| `carpool enroll EMAIL` | Read a Claude setup token from stdin and store it through the secret-store abstraction. |
+| `carpool mirror` | Run one Claude desktop-session mirror pass; accepts `--list`, `--dry-run`, `--prune`, and the mirror's other options. |
+| `carpool errors` | Show recently observed provider limit and authentication errors. |
+| `carpool watch [--dry-run]` | Take one snapshot, evaluate health transitions, and send or print alerts. |
+| `carpool brief` | Print a compact Markdown capacity section. |
+| `carpool runs` | Inspect the durable prompt/output/error ledger; `runs show ID` displays one run. |
 
-Precedence is `fable > review > sweep > build`: review beats build, while the
-fable floor cannot be diluted by mixed signals. Build, review, and sweep are
-elastic: if Codex is exhausted or limited and a Claude lane has headroom,
-`delegate` crosses families automatically and calls it out in `--why`. Fable
-work instead fails fast with the earliest reset when every Claude lane is
-limited; it never silently downgrades to Sol.
+Use `carpool COMMAND --help` for monitor and router options. The pass-through
+runners intentionally retain their concise shell usage strings.
 
-## Capacity model
+## Dispatch
 
-`ai-lanes capacity [--json]` reports one row per account across both families,
-including 5h and weekly use, any learned token capacity, cooldown, and a
-confidence label. Live Codex usage comes from each `CODEX_HOME`; the active
-Claude desktop login is also probed live through its keychain app token. Live
-readings have `live` confidence and are cached for 120 seconds so delegation
-stays fast.
+The router accepts prompt text or `-p PROMPTFILE` and can explain its decision:
 
-Claude setup-token lanes are different: their inference-only scope cannot read
-usage. After each run, `claude-lane` instead appends transcript token totals to
-`lane-usage.jsonl`, and the monitor computes rolling 5h and 7d estimates per
-email. Before calibration, `estimated` readings report raw token sums with no
-claimed capacity. A hard-limit observation records the window totals and
-reset, learns the largest observed capacity for each window, and gives the
-calibrated reading `observed` confidence. Existing rc 4/5 cooldowns supply
-`limited_until`.
+```bash
+carpool run --why -C /path/to/project -o result.md "Fix the failing retry test"
+carpool run --dry-run -p task.md
+```
 
-## Findings
+Its transparent pattern rules classify prose and final-judgment work, reviews,
+mechanical sweeps, and general build work. It chooses a model family, consults
+the shared capacity view, records the decision, and can cross from Codex to
+Claude when the default family has no dispatchable lane. Explicit `-H` and
+`-a` options pin a resource. `-m`, `-t`, `-s`, `-d`, and `-b` provide model,
+task-class, sandbox, detached-run, and salvage-branch overrides.
 
-Empirical constraints this design is built around (all reproduced, July 2026):
+The provider runners are also available directly:
 
-- **`claude setup-token` tokens are inference-only.** They carry scope
-  `user:inference`: the OAuth usage and profile endpoints return 403, so
-  per-lane quota probing and token↔account identity checks are impossible.
-  The only validation that means anything is a live inference call, and the
-  only identity gate is reading the account name on the OAuth approve page.
-- **The env var wins completely.** With `CLAUDE_CODE_OAUTH_TOKEN` set, the
-  keychain login is ignored — a lane process is only ever the account whose
-  token it holds. The app's own session token is *rejected* for CLI inference,
-  so lanes and the desktop login coexist without interference.
-- **Serving model ≠ configured model.** A session can be silently served by a
-  different model after a safety-classifier fallback while its environment
-  still reports the configured one. The transcript's per-message `model` field
-  is ground truth; `claude-lane` checks it after every run.
-- **The setup-token TUI wraps the token it prints** (~79 columns) even in a
-  raw `pipe-pane` stream. Capture in a terminal ≥130 columns wide, or rejoin
-  the fragments and validate by inference.
+```bash
+carpool codex -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+carpool claude -A -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+carpool claude -a user1@example.com -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+```
+
+An unpinned Codex run auto-picks a home and re-picks after a mid-run usage
+limit. An auto-selected Claude run does the same after a hard limit; lanes with
+a missing stored token are excluded before launch. Both runners retry transient
+failures, record each attempt, and can
+snapshot dirty Git state to dedicated salvage refs without moving `HEAD` or
+the real index. Claude additionally records lane usage and writes a
+`MODEL-DOWNGRADE` marker when the transcript shows silent model substitution.
+
+Adding this repository's `bin` directory before the vendor Codex binary also
+enables the `bin/codex` shim. It selects a lane for headless `exec`, `e`, and
+`review` calls when `CODEX_HOME` is unset. Set `CARPOOL_NO_AUTOPICK=1` to opt
+out; interactive commands and explicit homes pass through unchanged. carpool
+resolves the real Codex executable without depending on scheduler `PATH`.
+
+## Monitoring and repair
+
+`carpool watch` is a single pass suitable for cron or another scheduler. It
+persists snapshots and transition state under `~/.local/state/carpool` by
+default. Alerts cover exhausted or unauthenticated lanes, free-plan accounts,
+new app shadows, fleet exhaustion, and mirror health without repeating an
+unchanged condition every pass.
+
+The session mirror writes its per-pass result to the configured heartbeat
+sidecar. The watchdog tolerates a currently running pass, distinguishes a
+stale heartbeat from an in-flight run, and treats a run older than 30 minutes
+as hung. When configured, `mirror_restart_cmd` is included in the alert's
+recovery guidance.
+
+For a Codex lane whose live quota request returns the narrow expired-token
+signature, the watchdog may ask the vendor CLI to refresh its own credentials
+and then re-probe. Repair is guarded by a renewable lock lease, bounded by a
+timeout, disabled during dry runs, and latched after definitive revocation
+until a new login changes the authentication file. carpool never writes a
+Codex access token itself.
+
+## Configuration
+
+The default configuration file is `~/.config/carpool/accounts.json`. Important
+keys are:
+
+- `accounts` and `enrolled`: the Claude roster and its secret item names.
+- `codex_homes`: `null` for numeric-home discovery, or an explicit list.
+- `codex_app_home`: the observed desktop-app home.
+- `protected_account`: an optional identity fallback used only when the app
+  home cannot provide its current account.
+- `secret_store_cmd`: an argv prefix implementing `get NAME`, `set NAME` with
+  the value on stdin, and `del NAME`. When unset, carpool uses macOS `security`.
+- `notify_cmd`: an argv prefix receiving `SUBJECT BODY`; the complete message
+  is also sent on stdin. When unset, alerts go to stderr.
+- `mirror_heartbeat`, `mirror_job_label`, and
+  `mirror_restart_cmd`: optional mirror and scheduler integration.
+- `login_browser_cmd`: a browser argv prefix. A `{url}` placeholder is
+  replaced; otherwise the URL is appended.
+- `login_refresh_cmd`: a snapshot-refresh argv command run after login.
+
+Command settings may be JSON argv arrays or shell-like strings parsed into
+argv; they are never executed as shell expressions.
+
+Common environment overrides are `CARPOOL_CONFIG_DIR`, `CARPOOL_STATE_DIR`,
+`CARPOOL_CODEX_HOMES` (colon-separated on macOS/Linux),
+`CARPOOL_CODEX_APP_HOME`, `CARPOOL_CODEX_BIN`, `CARPOOL_CLAUDE_DIR`,
+`CARPOOL_CLAUDE_JSON`, `CARPOOL_SECRET_NAME_PREFIX`,
+`CARPOOL_SECRET_STORE_CMD`, `CARPOOL_NOTIFY_CMD`,
+`CARPOOL_MIRROR_HEARTBEAT`,
+`CARPOOL_MIRROR_JOB_LABEL`, `CARPOOL_MIRROR_RESTART_CMD`,
+`CARPOOL_LOGIN_BROWSER_CMD`, `CARPOOL_LOGIN_REFRESH_CMD`, and
+`CARPOOL_CODEX_GUARD=off` for an explicit one-run guard bypass.
+
+carpool does not embed secrets or local account identifiers in repository
+files. Runtime ledgers are created in the configured state directory with
+private permissions; runner output is written only to the path you request.
+
+## Codex command guard
+
+`carpool codex` preflights a portable Codex `PreToolUse` hook before launch.
+The hook covers four generic local-machine and Git hazards: unscoped root
+searches, decrypted keychain dumps, stash mutation in shared worktrees, and
+new local branches made from a stale local main branch. See
+[docs/guard.md](docs/guard.md) for the exact policies, trust checks, and the
+explicit one-run bypass.
+
+## Development
+
+```bash
+uv run pytest -q
+```
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).

@@ -330,8 +330,6 @@ def test_preamble_defaults_off_dry_run_and_decision(isolated, monkeypatch, capsy
     def run(cmd, **kwargs):
         if cmd[-1:] == ["--json"] or "status" in cmd:
             return CompletedProcess(cmd, 1, "", "")
-        if "codex-pick" in cmd[0]:
-            return CompletedProcess(cmd, 0, "/home/codex\n", "")
         seen.append((cmd, Path(cmd[cmd.index("-p") + 1]).read_text()))
         return CompletedProcess(cmd, 0, "", "")
     monkeypatch.setattr(delegate.subprocess, "run", run)
