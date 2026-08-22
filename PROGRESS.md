@@ -2,7 +2,7 @@
 
 ## State
 
-The public rename, unified CLI, topology/health behavior, durable ledger, login ritual, hardened auto-picking runners, and safe expired-token repair are complete. The final slice rewrites the documentation and performs the repository-wide privacy and legacy-name audit.
+The requested public port is complete on local `main`. The unified CLI, topology and health behavior, durable ledgers, login ritual, hardened runners, safe expired-token repair, documentation, and privacy scrub are committed; nothing has been pushed.
 
 ## Done
 
@@ -38,8 +38,11 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Closed the legacy account-report probe path so stored Claude setup tokens remain inference-only outside the explicit one-time enrollment validation.
 - Made Codex binary resolution and the PATH shim fail closed when no real vendor binary or dispatchable numbered lane exists, preventing accidental desktop-app dispatch and shim recursion.
 - Kept the expanded suite green (`352 passed in 22.28s`).
+- Rewrote the README and configuration example for the complete public command surface and abstractions, retaining only the one-line former-name note.
+- Verified the vendored mirror is byte-identical to its source (`ec9bfc1bcad6fc708b1bb7e0c3b2d2fe12d977c4186bdbd5ae3cfa41dbdd04b2`).
+- Scrubbed the tracked tree and lockfile: all example emails use the reserved `example.com` domain, the named private identifiers and UUID-shaped values are absent, and no obsolete executable or environment namespace remains.
+- Completed the final suite: `358 passed in 29.61s`.
 
 ## Next
 
-- Rewrite the README and configuration example for the complete public CLI.
-- Scrub identifiers and legacy names, run the exact final suite, and prepare the local review report without pushing.
+- Review the local commits and only push after the gated review approves them.
