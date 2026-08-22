@@ -1,4 +1,4 @@
-"""Claude identity, per-account OAuth quota probes, and limit-event scans."""
+"""Claude identity, enrollment state, and limit-event scans."""
 
 import json
 import os
@@ -16,7 +16,7 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 LIMIT_PHRASES = ("hit your session limit", "usage limit", "hit your weekly limit", "rate limit")
 
-# Lane dispatch gates (claude-pick). A lane must clear this much headroom in
+# Legacy lane-ranking gates. A lane must clear this much headroom in
 # EVERY probed window — unlike codex, the weekly window is a hard gate here,
 # because a Claude account through its week rejects work however fresh its 5h
 # window is.
@@ -55,10 +55,14 @@ def agent_secret_get(name: str, runner=None) -> str | None:
 
 def accounts_report(active_email: str | None, timeout: float = 15.0,
                     opener=None, secret_runner=None) -> list[dict]:
-    """Per-account Claude quota, roster order (active first). Enrolled accounts
-    are probed with their stored setup-token; everything else is identity-only.
-    Never fabricates: an unprobeable account carries enrolled=False and no
-    numbers."""
+    """Return enrollment state in roster order, with the active account first.
+
+    Setup tokens are inference credentials, not quota-observation credentials.
+    Keep the historical arguments for callers, but never send a stored setup
+    token to the OAuth usage endpoint. Live dispatch capacity comes from the
+    local usage ledger instead.
+    """
+    del timeout, opener
     cfg = roster_config()
     enrolled = {
         k: v for k, v in (cfg.get("enrolled") or {}).items() if isinstance(v, str) and v
@@ -69,11 +73,7 @@ def accounts_report(active_email: str | None, timeout: float = 15.0,
         if row["enrolled"]:
             token = agent_secret_get(enrolled[email], runner=secret_runner)
             if token:
-                row["probe"] = {
-                    k: v
-                    for k, v in probe_oauth_usage(token, timeout=timeout, opener=opener).items()
-                    if k != "raw"
-                }
+                row["probe"] = {"status": "inference-only"}
             else:
                 row["probe"] = {"status": "secret-missing", "secret": enrolled[email]}
         rows.append(row)

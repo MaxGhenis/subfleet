@@ -117,7 +117,7 @@ class TestAccountsReport:
             "codex_homes": [],
         })
 
-    def test_enrolled_account_probed(self, env_paths):
+    def test_enrolled_setup_token_is_not_quota_probed(self, env_paths):
         self._roster({"charlie@example.com": "claude-quota-charlie@example.com"})
 
         def fake_secret(cmd, **kw):
@@ -128,13 +128,13 @@ class TestAccountsReport:
             return R()
 
         def fake_opener(req, t):
-            assert "tok-c" in req.headers.get("Authorization", "")
-            return 200, json.dumps({"five_hour": {"utilization": 12}}).encode()
+            raise AssertionError("stored setup tokens must not be sent to the usage endpoint")
 
         rows = claude.accounts_report("alpha@example.com", opener=fake_opener, secret_runner=fake_secret)
         by = {r["email"]: r for r in rows}
         assert by["alpha@example.com"]["active"] and not by["alpha@example.com"]["enrolled"]
-        assert by["charlie@example.com"]["enrolled"] and by["charlie@example.com"]["probe"]["status"] == "ok"
+        assert by["charlie@example.com"]["enrolled"]
+        assert by["charlie@example.com"]["probe"]["status"] == "inference-only"
         assert by["echo@example.com"]["enrolled"] is False and "probe" not in by["echo@example.com"]
         assert rows[0]["email"] == "alpha@example.com"  # active sorts first
 

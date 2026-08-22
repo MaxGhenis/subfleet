@@ -9,7 +9,7 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Confirmed the target branch is `main` and recorded the starting commit.
 - Inventoried the public package, command wrappers, tests, and private reference surface.
 - Established a green pre-port baseline: `183 passed in 6.48s`.
-- Renamed the Python package and `AI_LANES_*` environment namespace to `carpool` and `CARPOOL_*`.
+- Renamed the Python package and legacy environment namespace to `carpool` and `CARPOOL_*`.
 - Consolidated the legacy picker/delegate/runner entry points behind `carpool pick`, `carpool run`, `carpool codex`, and `carpool claude`; removed the superseded scripts.
 - Kept the renamed public suite green (`180 passed in 5.28s`; three deleted-entry-point checks were intentionally removed).
 - Split the observed desktop app home from numbered dispatch lanes and made the app identity authoritative over the configured protected-account fallback.
@@ -29,12 +29,13 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Preserved caller working directories in the repository launcher and kept the combined suite green (`317 passed`).
 - Added `carpool login codex <N|app>` with configurable browser launching, private state permissions, a detached completion watcher, distinct numbered-lane validation, app-shadow reporting, public notifications, and a configurable status refresh.
 - Completed unified `mirror`, `brief`, and app-inclusive `errors` routing and added compact Markdown capacity rendering.
-- Unified Claude picking and status snapshots on the durable capacity ledger; inference-only setup tokens are no longer sent to the usage endpoint, expected enrollment responses are accepted, and successful re-enrollment clears stale cooldowns.
+- Unified Claude picking and status snapshots on the durable capacity ledger; stored inference-only setup tokens are not used for routine quota probes, expected one-time enrollment responses are accepted, and successful re-enrollment clears stale cooldowns.
 - Hardened the Claude ledger to count normal and cached input tokens, ignore torn/non-finite records, retain legacy totals, and keep cooldown updates locked and monotonic.
 - Excluded malformed enrollments and missing secret-store items before dispatch, and made direct runner authentication failures persist the same 30-day cooldown as delegated runs.
 - Added free-plan and app-shadow handling to the normalized cross-provider capacity surface, classified Codex windows by duration, and filtered the app home and duplicate paths from explicit lane configuration.
 - Added a strictly gated vendor-CLI refresh probe for expired Codex access tokens, with locked renewable leases, pre-command auth revalidation, a 20-minute retry interval, post-refresh re-probe, dry-run safety, and definitive revocation latching until re-login changes the auth timestamp.
 - Recomputed and persisted the healed snapshot before alert evaluation so auth recovery and fleet capacity are visible in the same watchdog cycle.
+- Closed the legacy account-report probe path so stored Claude setup tokens remain inference-only outside the explicit one-time enrollment validation.
 - Kept the expanded suite green (`352 passed in 22.28s`).
 
 ## Next

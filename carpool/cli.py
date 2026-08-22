@@ -365,9 +365,11 @@ def cmd_login(args) -> int:
 
 
 def cmd_enroll(args) -> int:
-    """Store a per-account Claude OAuth token (from `claude setup-token`) so the
-    watchdog can probe that account's limits. Token is read from stdin — never
-    from argv — validated against the usage endpoint before storing."""
+    """Store a Claude setup token for inference dispatch.
+
+    The token is read from stdin, never argv or environment. Enrollment makes
+    one validation request; routine status and dispatch use the local ledger.
+    """
     import getpass
     email = args.email
     try:
@@ -604,7 +606,7 @@ def main(argv=None) -> int:
 
     sub.add_parser("brief", help="compact Markdown section for a daily status brief")
 
-    p_enroll = sub.add_parser("enroll", help="store a Claude account token for quota probing")
+    p_enroll = sub.add_parser("enroll", help="store a Claude setup token for lane dispatch")
     p_enroll.add_argument("email", help="account email (must be in accounts.json roster)")
 
     p_secret = sub.add_parser("secret", help=argparse.SUPPRESS)
