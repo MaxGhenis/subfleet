@@ -7,7 +7,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from carpool import paths, run_ledger
+from carpool import cli, paths, run_ledger
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -306,3 +306,54 @@ def test_retention_prunes_abandoned_directory_and_lists_full_collision_ids(
     monkeypatch.setattr(run_ledger, "MAX_RUNS", 2)
     assert run_ledger.prune() == [abandoned.name]
     assert not abandoned.exists()
+
+
+def test_runs_cli_lists_and_shows_artifacts(tmp_path, capsys):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n")
+    out = tmp_path / "out.md"
+    err = tmp_path / "err.log"
+    run_id = run_ledger.start_run(
+        family="codex",
+        model="codex-model",
+        lane="/lanes/one",
+        workdir=workdir,
+        prompt=prompt,
+        out=out,
+        err=err,
+    )
+    out.write_text("answer\n")
+    err.write_text("warning\n")
+    run_ledger.finish_run(run_id, rc=0)
+
+    assert cli.main(["runs", "--last", "1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["id"] == run_id
+    assert cli.main(["runs", "show", run_id, "--err"]) == 0
+    shown = capsys.readouterr().out
+    assert "--- out.md ---" in shown and "answer" in shown
+    assert "--- err.log ---" in shown and "warning" in shown
+
+
+def test_record_run_cli_validates_and_updates(tmp_path, capsys):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt")
+    out = tmp_path / "out.md"
+    assert cli.main([
+        "_record-run", "--phase", "start", "--family", "codex",
+        "--model", "codex-model", "--workdir", str(workdir),
+        "--prompt", str(prompt), "--out", str(out),
+    ]) == 0
+    run_id = capsys.readouterr().out.strip()
+    assert cli.main([
+        "_record-run", "--phase", "update", "--run-id", run_id,
+        "--lane", "/lanes/two",
+    ]) == 0
+    assert cli.main([
+        "_record-run", "--phase", "finish", "--run-id", run_id, "--rc", "9",
+    ]) == 0
+    assert run_ledger.load_run(run_id)[1]["lane"] == "/lanes/two"
+    assert run_ledger.load_run(run_id)[1]["rc"] == 9

@@ -15,11 +15,23 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from . import capacity, claude, codex, config, paths, render, secret_store, snapshot, watchdog
+from . import (
+    capacity,
+    claude,
+    codex,
+    config,
+    paths,
+    render,
+    run_ledger,
+    secret_store,
+    snapshot,
+    watchdog,
+)
 from .util import from_epoch, iso, load_json, now_local, parse_iso, parse_reset_clock, strip_private
 
 
@@ -359,6 +371,93 @@ def cmd_secret(args) -> int:
     return 0
 
 
+def cmd_record_run(args) -> int:
+    """Best-effort start/update/finish hook used by the hardened runners."""
+    try:
+        if args.phase == "start":
+            required = {
+                "family": args.family,
+                "model": args.model,
+                "workdir": args.workdir,
+                "prompt": args.prompt,
+                "out": args.out,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "start requires " + ", ".join(f"--{name}" for name in missing)
+                )
+            print(
+                run_ledger.start_run(
+                    family=args.family,
+                    model=args.model,
+                    lane=args.lane,
+                    workdir=args.workdir,
+                    prompt=args.prompt,
+                    out=args.out,
+                    err=args.err,
+                    lane_log=args.lane_log,
+                    original_out=args.original_out,
+                    decision_json=(
+                        args.decision_json
+                        if args.decision_json is not None
+                        else os.environ.get("CARPOOL_RUN_DECISION_JSON")
+                    ),
+                    started=args.started,
+                )
+            )
+        elif args.phase == "update":
+            if not args.run_id:
+                raise ValueError("update requires --run-id")
+            run_ledger.update_run(
+                args.run_id, lane=args.lane, session_id=args.session_id
+            )
+        else:
+            if not args.run_id or args.rc is None:
+                raise ValueError("finish requires --run-id and --rc")
+            run_ledger.finish_run(
+                args.run_id,
+                rc=args.rc,
+                lane=args.lane,
+                session_id=args.session_id,
+                transcript_path=args.transcript_path,
+                finished=args.finished,
+            )
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"carpool _record-run: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_runs(args) -> int:
+    if args.runs_command == "show":
+        try:
+            run_dir, meta = run_ledger.load_run(args.id)
+        except (OSError, ValueError) as exc:
+            print(f"carpool runs show: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(strip_private(meta), indent=1))
+        artifacts = [("out.md", run_dir / "out.md")]
+        if args.err:
+            artifacts.append(("err.log", run_dir / "err.log"))
+        for label, artifact in artifacts:
+            print(f"\n--- {label} ---")
+            try:
+                text = artifact.read_text(errors="replace")
+            except OSError:
+                text = ""
+            sys.stdout.write(text)
+            if text and not text.endswith("\n"):
+                print()
+        return 0
+    if args.last < 0:
+        print("carpool runs: --last must be non-negative", file=sys.stderr)
+        return 2
+    rows = run_ledger.list_runs(args.last)
+    print(json.dumps(rows, indent=1) if args.json else run_ledger.format_runs(rows))
+    return 0
+
+
 def _bin(name: str) -> str:
     return str(Path(__file__).resolve().parent.parent / "bin" / name)
 
@@ -385,6 +484,14 @@ def main(argv=None) -> int:
 
     p_capacity = sub.add_parser("capacity", help="5h + weekly headroom across both families")
     p_capacity.add_argument("--json", action="store_true")
+
+    p_runs = sub.add_parser("runs", help="durable prompt/output/error ledger")
+    p_runs.add_argument("--last", type=int, default=20)
+    p_runs.add_argument("--json", action="store_true")
+    runs_sub = p_runs.add_subparsers(dest="runs_command")
+    p_runs_show = runs_sub.add_parser("show", help="print one run and its output")
+    p_runs_show.add_argument("id")
+    p_runs_show.add_argument("--err", action="store_true")
 
     p_pick = sub.add_parser(
         "pick", help="best lane for dispatch: `pick codex` (home) or `pick claude` (email)"
@@ -433,10 +540,29 @@ def main(argv=None) -> int:
     p_usage_limit.add_argument("--session-id", required=True)
     p_usage_limit.add_argument("--error-file", action="append", default=[])
 
+    p_run_record = sub.add_parser("_record-run", help=argparse.SUPPRESS)
+    p_run_record.add_argument("--phase", choices=("start", "update", "finish"), required=True)
+    p_run_record.add_argument("--run-id")
+    p_run_record.add_argument("--family", choices=("codex", "claude"))
+    p_run_record.add_argument("--model")
+    p_run_record.add_argument("--lane")
+    p_run_record.add_argument("--workdir")
+    p_run_record.add_argument("--prompt")
+    p_run_record.add_argument("--out")
+    p_run_record.add_argument("--err")
+    p_run_record.add_argument("--lane-log")
+    p_run_record.add_argument("--original-out")
+    p_run_record.add_argument("--rc", type=int)
+    p_run_record.add_argument("--started")
+    p_run_record.add_argument("--finished")
+    p_run_record.add_argument("--session-id")
+    p_run_record.add_argument("--transcript-path")
+    p_run_record.add_argument("--decision-json")
+
     argv = list(sys.argv[1:] if argv is None else argv)
     known = {
-        "status", "capacity", "pick", "run", "codex", "claude", "errors", "watch", "enroll",
-        "secret", "lane-usage",
+        "status", "capacity", "runs", "pick", "run", "codex", "claude", "errors",
+        "watch", "enroll", "secret", "lane-usage", "_record-run",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
@@ -463,11 +589,13 @@ def main(argv=None) -> int:
     handlers = {
         "status": cmd_status,
         "capacity": cmd_capacity,
+        "runs": cmd_runs,
         "errors": cmd_errors,
         "watch": cmd_watch,
         "enroll": cmd_enroll,
         "secret": cmd_secret,
         "lane-usage": cmd_lane_usage,
+        "_record-run": cmd_record_run,
     }
     return handlers[args.command](args)
 

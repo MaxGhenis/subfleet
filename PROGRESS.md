@@ -20,7 +20,8 @@ The public rename, topology/health behavior, and durable run-ledger core are com
 - Kept the topology/health suite green (`215 passed`).
 - Added a private-permission durable run ledger with immutable prompts, provider artifacts, Git/salvage metadata, transcript discovery, collision-safe IDs, and bounded retention.
 - Added live in-flight counts as a same-capacity dispatch tie-break; better headroom always wins.
-- Kept the expanded suite green (`223 passed`).
+- Exposed `carpool runs`, `carpool runs show`, and the private runner recording hook.
+- Kept the expanded suite green (`225 passed`).
 
 ## Next
 
