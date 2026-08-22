@@ -4,7 +4,7 @@ verdicts. Every number carries its provenance (live probe vs observed-at)."""
 from datetime import timedelta
 from pathlib import Path
 
-from . import claude, codex, paths
+from . import claude, codex, paths, run_ledger
 from .util import atomic_write_json, iso, now_local, parse_iso, strip_private
 
 # A home is dispatchable only with at least this much 5h-window headroom.
@@ -317,6 +317,7 @@ def rank_for_dispatch(home_entries: list[dict], handicap: float = 10.0,
     within `stale_max_min`, flagged stale so callers can decide."""
     now = now_local()
     protected = codex.protected_account()
+    in_flight = run_ledger.in_flight_counts()
     candidates = []
     for e in home_entries:
         if e.get("duplicate_of"):
@@ -360,7 +361,15 @@ def rank_for_dispatch(home_entries: list[dict], handicap: float = 10.0,
                 "protected": spared,
                 "as_of": e["windows"].get("as_of"),
                 "score": round(score, 2),
+                "in_flight": in_flight.get(("codex", str(e["home"])), 0),
             }
         )
-    candidates.sort(key=lambda c: (c["stale"], c["score"], c["weekly_used_percent"]))
+    candidates.sort(
+        key=lambda candidate: (
+            candidate["stale"],
+            candidate["score"],
+            candidate["weekly_used_percent"],
+            candidate["in_flight"],
+        )
+    )
     return candidates

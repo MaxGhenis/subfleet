@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from carpool import run_ledger
 from carpool.snapshot import rank_for_dispatch
 from carpool.util import now_local
 
@@ -34,7 +35,7 @@ class TestRanking:
 
     def test_primary_handicap_spares_main_account(self):
         ranked = rank_for_dispatch([
-            entry("/h/.codex", 10, account="a", primary_home=True),
+            entry("/h/.codex-1", 10, account="a", primary_home=True),
             entry("/h/.codex-3", 15, account="b"),
         ])
         # 10+10 handicap > 15, so the alternate wins despite higher raw usage.
@@ -42,10 +43,10 @@ class TestRanking:
 
     def test_no_handicap_ranks_raw(self):
         ranked = rank_for_dispatch([
-            entry("/h/.codex", 10, account="a", primary_home=True),
+            entry("/h/.codex-1", 10, account="a", primary_home=True),
             entry("/h/.codex-3", 15, account="b"),
         ], handicap=0)
-        assert ranked[0]["home"] == "/h/.codex"
+        assert ranked[0]["home"] == "/h/.codex-1"
 
     def test_duplicates_excluded(self):
         ranked = rank_for_dispatch([
@@ -90,3 +91,28 @@ class TestRanking:
             entry("/h/.codex-3", 10, weekly=5, account="b"),
         ])
         assert ranked[0]["home"] == "/h/.codex-3"
+
+    def test_in_flight_is_a_same_capacity_tiebreak(self, monkeypatch):
+        monkeypatch.setattr(
+            run_ledger,
+            "in_flight_counts",
+            lambda: {("codex", "/h/.codex-2"): 2},
+        )
+        ranked = rank_for_dispatch([
+            entry("/h/.codex-2", 10, weekly=5, account="a"),
+            entry("/h/.codex-3", 10, weekly=5, account="b"),
+        ])
+        assert [row["home"] for row in ranked] == ["/h/.codex-3", "/h/.codex-2"]
+        assert ranked[1]["in_flight"] == 2
+
+    def test_better_headroom_beats_in_flight_count(self, monkeypatch):
+        monkeypatch.setattr(
+            run_ledger,
+            "in_flight_counts",
+            lambda: {("codex", "/h/.codex-2"): 5},
+        )
+        ranked = rank_for_dispatch([
+            entry("/h/.codex-2", 5, account="a"),
+            entry("/h/.codex-3", 10, account="b"),
+        ])
+        assert ranked[0]["home"] == "/h/.codex-2"

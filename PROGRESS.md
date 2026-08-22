@@ -2,7 +2,7 @@
 
 ## State
 
-The public rename and the Codex app-home/lane topology, free-plan guard, and session-mirror health are complete. The next slice adds the durable run ledger and connects its in-flight counts before the login and hardened-runner ports.
+The public rename, topology/health behavior, and durable run-ledger core are complete. The next slice ports the re-login ritual through configured state and notifications, then the hardened auto-picking runners.
 
 ## Done
 
@@ -18,8 +18,11 @@ The public rename and the Codex app-home/lane topology, free-plan guard, and ses
 - Added mirror sidecar heartbeat health, in-flight tolerance, the 30-minute hang cutoff, generic scheduler/recovery configuration, and watchdog/render coverage.
 - Vendored `carpool-mirror` byte-identically from the reference (`ec9bfc1…`) and pinned its public name/version strings.
 - Kept the topology/health suite green (`215 passed`).
+- Added a private-permission durable run ledger with immutable prompts, provider artifacts, Git/salvage metadata, transcript discovery, collision-safe IDs, and bounded retention.
+- Added live in-flight counts as a same-capacity dispatch tie-break; better headroom always wins.
+- Kept the expanded suite green (`223 passed`).
 
 ## Next
 
-- Commit the durable run ledger and add its in-flight counts to dispatch ranking.
-- Port `carpool login`, runner auto-pick/re-pick, the Codex PATH shim, and the generic guard.
+- Port `carpool login codex <N|app>` and its completion watcher through configured state, `notify.py`, and the unified CLI.
+- Port runner auto-pick/re-pick, the Codex PATH shim, and the generic guard.
