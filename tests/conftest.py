@@ -7,20 +7,20 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     """Keep every test away from the operator's config, state, and accounts."""
-    monkeypatch.setenv("AI_LANES_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("CARPOOL_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in (
-        "AI_LANES_STATE_DIR",
-        "AI_LANES_CLAUDE_ACCOUNTS",
-        "AI_LANES_NOTIFY",
-        "AI_LANES_CODEX_HOMES",
+        "CARPOOL_STATE_DIR",
+        "CARPOOL_CLAUDE_ACCOUNTS",
+        "CARPOOL_NOTIFY",
+        "CARPOOL_CODEX_HOMES",
         "DELEGATE_STATE_DIR",
         "DELEGATE_ACCOUNTS_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
 
-    from ai_lanes import config
+    from carpool import config
 
     config.save({"accounts": [], "enrolled": {}, "codex_homes": []})
 
@@ -73,8 +73,8 @@ def codex_home_factory(tmp_path):
 
 @pytest.fixture
 def env_paths(tmp_path, monkeypatch):
-    """Point every ai_lanes path at tmp dirs."""
-    from ai_lanes import config
+    """Point every carpool path at tmp dirs."""
+    from carpool import config
 
     state = config.state_dir()
     claude_dir = tmp_path / "dot-claude"
@@ -100,8 +100,8 @@ def env_paths(tmp_path, monkeypatch):
         f'printf "%s\\n" "$payload" >> "{notify_log}"\n'
     )
     notify.chmod(0o755)
-    monkeypatch.setenv("AI_LANES_CLAUDE_DIR", str(claude_dir))
-    monkeypatch.setenv("AI_LANES_CLAUDE_JSON", str(claude_json))
+    monkeypatch.setenv("CARPOOL_CLAUDE_DIR", str(claude_dir))
+    monkeypatch.setenv("CARPOOL_CLAUDE_JSON", str(claude_json))
     config.save(
         {
             "accounts": [],

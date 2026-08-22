@@ -6,9 +6,9 @@ from datetime import timedelta
 
 import pytest
 
-from ai_lanes import claude, cli, watchdog
-from ai_lanes.claude import lane_verdict, lanes_fleet, rank_lanes
-from ai_lanes.util import iso, now_local
+from carpool import claude, cli, watchdog
+from carpool.claude import lane_verdict, lanes_fleet, rank_lanes
+from carpool.util import iso, now_local
 
 
 def lane_row(email, fh=None, wk=None, enrolled=True, active=False, status="ok",
@@ -159,7 +159,7 @@ class TestClaudePickCli:
             lane_row("alpha@example.com", fh=40, wk=30),
             lane_row("beta@example.com", fh=10, wk=10),
         ])
-        rc = cli.main(["claude-pick"])
+        rc = cli.main(["pick", "claude"])
         out = capsys.readouterr()
         assert rc == 0
         assert out.out.strip() == "beta@example.com"
@@ -168,7 +168,7 @@ class TestClaudePickCli:
     def test_no_lane_exits_1_with_earliest_reset(self, env_paths, monkeypatch, capsys):
         soon = iso(now_local() + timedelta(hours=2))
         self._patch_rows(monkeypatch, [lane_row("alpha@example.com", fh=99, wk=10, fh_reset=soon)])
-        rc = cli.main(["claude-pick"])
+        rc = cli.main(["pick", "claude"])
         err = capsys.readouterr().err
         assert rc == 1
         assert "no dispatchable claude lane" in err
@@ -176,11 +176,11 @@ class TestClaudePickCli:
 
     def test_zero_enrolled_prints_ritual(self, env_paths, monkeypatch, capsys):
         self._patch_rows(monkeypatch, [lane_row("alpha@example.com", enrolled=False)])
-        rc = cli.main(["claude-pick"])
+        rc = cli.main(["pick", "claude"])
         err = capsys.readouterr().err
         assert rc == 1
         assert "claude setup-token" in err
-        assert "ai-lanes enroll" in err
+        assert "carpool enroll" in err
 
     def test_json_ranking_and_exclusions(self, env_paths, monkeypatch, capsys):
         self._patch_rows(monkeypatch, [
@@ -188,7 +188,7 @@ class TestClaudePickCli:
             lane_row("beta@example.com", fh=20, wk=20),
             lane_row("charlie@example.com", status="token-invalid"),
         ])
-        rc = cli.main(["claude-pick", "--json", "--all"])
+        rc = cli.main(["pick", "claude", "--json", "--all"])
         out = json.loads(capsys.readouterr().out)
         assert rc == 0
         assert out["best"] == "alpha@example.com"
@@ -201,14 +201,14 @@ class TestClaudePickCli:
             lane_row("anchor@example.com", fh=10, wk=10, active=True),
             lane_row("beta@example.com", fh=15, wk=15),
         ])
-        assert cli.main(["claude-pick"]) == 0
+        assert cli.main(["pick", "claude"]) == 0
         assert capsys.readouterr().out.strip() == "beta@example.com"
-        assert cli.main(["claude-pick", "--no-handicap"]) == 0
+        assert cli.main(["pick", "claude", "--no-handicap"]) == 0
         assert capsys.readouterr().out.strip() == "anchor@example.com"
 
     def test_cached_uses_snapshot(self, env_paths, monkeypatch, capsys):
-        from ai_lanes import paths
-        from ai_lanes.util import atomic_write_json
+        from carpool import paths
+        from carpool.util import atomic_write_json
 
         atomic_write_json(paths.snapshot_path(), {
             "generated_at": iso(now_local()),
@@ -217,7 +217,7 @@ class TestClaudePickCli:
         # Live probes must not run in cached mode.
         monkeypatch.setattr(claude, "accounts_report",
                             lambda *a, **k: pytest.fail("live probe in --cached"))
-        rc = cli.main(["claude-pick", "--cached"])
+        rc = cli.main(["pick", "claude", "--cached"])
         assert rc == 0
         assert capsys.readouterr().out.strip() == "cached@example.com"
 
@@ -259,7 +259,7 @@ class TestWatchdogLaneConditions:
         summary = watchdog.run(snap=s)
         assert "claude-lane-auth:broken@example.com" in summary["alerts_sent"]
         log = env_paths["notify_log"].read_text()
-        assert "ai-lanes enroll broken@example.com" in log
+        assert "carpool enroll broken@example.com" in log
 
     def test_all_lanes_exhausted_warns_only_when_enrolled(self, env_paths):
         empty = lane_snap(lanes_fleet([]))
@@ -278,7 +278,7 @@ class TestWatchdogLaneConditions:
 
 class TestLaneRender:
     def test_table_shows_lane_rows_and_fleet_line(self, env_paths):
-        from ai_lanes import render
+        from carpool import render
 
         s = lane_snap(lanes_fleet([
             lane_row("alpha@example.com", fh=12, wk=34),

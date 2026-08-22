@@ -1,10 +1,10 @@
 [project]
-name = "ai-lanes"
+name = "carpool"
 version = "0.1.0"
 description = "Multi-account AI subscription monitoring and hardened task dispatch"
 readme = "README.md"
 license = {file = "LICENSE"}
-authors = [{name = "Max Ghenis"}]
+authors = []
 requires-python = ">=3.12"
 dependencies = []
 
@@ -14,4 +14,3 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-

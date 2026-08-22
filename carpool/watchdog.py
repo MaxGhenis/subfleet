@@ -54,7 +54,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         "`codex login` (starting a login purges the old token immediately).\n"
                         f"Heal: CODEX_HOME={_short(e['home'])} codex login\n"
                         "Pick the account that home is supposed to hold; verify distinctness "
-                        "afterward with: ai-lanes status"
+                        "afterward with: carpool status"
                     ),
                 }
             )
@@ -99,7 +99,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         f"(seen {seen}). That home is dead until re-login.\n"
                         f"Heal: CODEX_HOME={_short(e['home'])} codex login\n"
                         "Likely cause: the same account bound in two homes (one refresh revokes "
-                        "the sibling). Verify configured homes hold distinct accounts afterward: ai-lanes status"
+                        "the sibling). Verify configured homes hold distinct accounts afterward: carpool status"
                     ),
                 }
             )
@@ -132,7 +132,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 "severity": "critical",
                 "subject": "codex: NO dispatchable lanes",
                 "body": f"All codex accounts are exhausted, dead, or unknown.{reset_txt}\n"
-                        "Details: ai-lanes status",
+                        "Details: carpool status",
             }
         )
     elif fleet["dispatchable_now"] == 1:
@@ -174,7 +174,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         f"Enrolled lane {lane['email']} failed its usage probe "
                         f"({lane['verdict']}) — headless dispatch to it will fail.\n"
                         f"Heal: claude setup-token   # sign into {lane['email']}\n"
-                        f"                 ai-lanes enroll {lane['email']}"
+                        f"                 carpool enroll {lane['email']}"
                     ),
                 }
             )
@@ -191,7 +191,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 "subject": "claude: no dispatchable lanes",
                 "body": (
                     f"All {lanes['enrolled']} enrolled Claude lane(s) are exhausted or "
-                    f"failing.{lane_reset_txt}\nDetails: ai-lanes claude-pick --json --all"
+                    f"failing.{lane_reset_txt}\nDetails: carpool claude-pick --json --all"
                 ),
             }
         )

@@ -1,6 +1,6 @@
 import subprocess
 
-from ai_lanes import config, notify
+from carpool import config, notify
 
 
 BASE = {"accounts": [], "enrolled": {}, "codex_homes": []}

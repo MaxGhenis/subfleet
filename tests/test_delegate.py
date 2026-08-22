@@ -5,7 +5,7 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from ai_lanes import config, delegate
+from carpool import config, delegate
 
 
 @pytest.mark.parametrize(("prompt", "kind", "model"), [
@@ -221,7 +221,7 @@ def test_no_codex_capacity_overflows_automatically(isolated, monkeypatch, capsys
     assert delegate.main(["implement x", "-o", str(out)]) == 0
     err = capsys.readouterr().err
     assert "cross-family" in err.lower()
-    assert any("claude-lane" in cmd[0] for cmd in calls)
+    assert any("carpool-claude" in cmd[0] for cmd in calls)
 
 
 @pytest.mark.parametrize(
@@ -262,7 +262,7 @@ def test_exhausted_codex_capacity_overflows_elastic_classes(
     assert delegate.main(["--why", prompt, "-o", str(isolated / "out")]) == 0
 
     cmd, merged_prompt = seen[0]
-    assert "claude-lane" in cmd[0]
+    assert "carpool-claude" in cmd[0]
     assert cmd[cmd.index("-m") + 1] == delegate.MODEL_NAMES["fable"]
     assert cmd[cmd.index("-s") + 1] == expected_sandbox
     assert (delegate.PREAMBLE_AUDIT in merged_prompt) is audit_preamble
@@ -345,7 +345,7 @@ def test_preamble_defaults_off_dry_run_and_decision(isolated, monkeypatch, capsy
     assert seen[0][1] == "review x" and seen[0][0][seen[0][0].index("-s") + 1] == "read-only"
     seen.clear()
     assert delegate.main(["--dry-run", "-H", "/h", "implement x", "-o", str(out)]) == 0
-    assert not seen and "codex-run" in capsys.readouterr().out
+    assert not seen and "carpool-codex" in capsys.readouterr().out
     assert len((isolated / "decisions.jsonl").read_text().splitlines()) == 3
 
 

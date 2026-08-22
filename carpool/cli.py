@@ -1,19 +1,16 @@
-"""ai-lanes CLI.
+"""carpool CLI — multi-account AI capacity and dispatch, one front door.
 
-  ai-lanes                      # human table (live probes)
-  ai-lanes status --json        # machine-readable snapshot
-  ai-lanes status --cached      # last watchdog snapshot, no network
-  ai-lanes pick                 # best CODEX_HOME on stdout (rc=1 if none)
-  ai-lanes pick --json --all    # full ranking with exclusion context
-  ai-lanes claude-pick          # best enrolled Claude lane (email) on stdout
-  ai-lanes claude-pick --json --all  # full lane ranking with exclusions
-  ai-lanes errors --hours 48    # observed limit/auth errors, both providers
-  ai-lanes watch [--dry-run]    # one monitor/alert cycle (scheduler-friendly)
-  ai-lanes enroll <email>       # store a Claude lane token (from claude setup-token)
-
-Orchestrator one-liners:
-  CODEX_HOME=$(ai-lanes pick) codex-run ...   # or: codex-pick
-  claude-lane -A ...                          # auto-lane via claude-pick
+  carpool                       # human table (live probes)
+  carpool status --json|--cached
+  carpool capacity [--json]
+  carpool pick codex            # best dispatchable CODEX_HOME
+  carpool pick claude           # best enrolled Claude lane
+  carpool run ...                # capacity-aware delegate router
+  carpool codex ...              # hardened Codex runner
+  carpool claude ...             # hardened Claude runner
+  carpool enroll <email>
+  carpool errors --hours 48
+  carpool watch [--dry-run]
 """
 
 import argparse
@@ -31,7 +28,7 @@ def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
         snap = load_json(paths.snapshot_path())
         if snap:
             return snap
-        print("ai-lanes: no cached snapshot yet; probing live", file=sys.stderr)
+        print("carpool: no cached snapshot yet; probing live", file=sys.stderr)
     # Small error window interactively; the watchdog covers the long window.
     return snapshot.build(live=True, timeout=live_timeout, errors_hours=6)
 
@@ -147,7 +144,7 @@ def cmd_lane_usage(args) -> int:
         return 0
     except Exception as exc:
         # Accounting must never turn a completed agent run into a failure.
-        print(f"ai-lanes lane-usage: accounting skipped: {exc}", file=sys.stderr)
+        print(f"carpool lane-usage: accounting skipped: {exc}", file=sys.stderr)
         return 0
 
 
@@ -178,7 +175,7 @@ def cmd_pick(args) -> int:
     if not ranked:
         earliest = snap["codex"]["fleet"].get("earliest_reset")
         print(
-            "ai-lanes pick: no dispatchable codex home"
+            "carpool pick: no dispatchable codex home"
             + (f" (earliest 5h reset {earliest})" if earliest else ""),
             file=sys.stderr,
         )
@@ -207,7 +204,7 @@ def _claude_lane_rows(cached: bool, timeout: float = 15.0) -> tuple[str | None, 
         snap = load_json(paths.snapshot_path())
         if snap:
             return snap.get("generated_at"), (snap.get("claude") or {}).get("accounts") or []
-        print("ai-lanes: no cached snapshot yet; probing live", file=sys.stderr)
+        print("carpool: no cached snapshot yet; probing live", file=sys.stderr)
     from .util import iso, now_local
 
     return iso(now_local()), claude.accounts_report(claude.identity().get("email"), timeout=timeout)
@@ -236,8 +233,8 @@ def cmd_claude_pick(args) -> int:
     if not ranked:
         if fleet["enrolled"] == 0:
             print(
-                "ai-lanes claude-pick: no lanes enrolled — enroll with: "
-                "claude setup-token, then ai-lanes enroll <email>",
+                "carpool pick claude: no lanes enrolled — enroll with: "
+                "claude setup-token, then carpool enroll <email>",
                 file=sys.stderr,
             )
         else:
@@ -245,7 +242,7 @@ def cmd_claude_pick(args) -> int:
                 f"{l['email']} {l['verdict']}" for l in fleet["lanes"] if l["verdict"] != "ok"
             )
             print(
-                "ai-lanes claude-pick: no dispatchable claude lane"
+                "carpool pick claude: no dispatchable claude lane"
                 + (f" (earliest reset {fleet['earliest_reset']})" if fleet.get("earliest_reset") else "")
                 + (f" — {blocked}" if blocked else ""),
                 file=sys.stderr,
@@ -309,16 +306,16 @@ def cmd_enroll(args) -> int:
     try:
         cfg = config.load(strict=True)
     except config.ConfigError as exc:
-        print(f"ai-lanes enroll: {exc}", file=sys.stderr)
+        print(f"carpool enroll: {exc}", file=sys.stderr)
         return 2
     accounts = cfg.get("accounts", [])
     enrolled = cfg.get("enrolled")
     if not isinstance(accounts, list) or (enrolled is not None and not isinstance(enrolled, dict)):
-        print(f"ai-lanes enroll: invalid roster schema in {config.accounts_path()}", file=sys.stderr)
+        print(f"carpool enroll: invalid roster schema in {config.accounts_path()}", file=sys.stderr)
         return 2
     roster = sorted(account for account in accounts if isinstance(account, str) and "@" in account)
     if email not in roster:
-        print(f"ai-lanes enroll: {email} is not in the roster ({len(roster)} accounts); "
+        print(f"carpool enroll: {email} is not in the roster ({len(roster)} accounts); "
               f"add it to {claude.roster_config_path()} first", file=sys.stderr)
         return 2
     if sys.stdin.isatty():
@@ -326,16 +323,16 @@ def cmd_enroll(args) -> int:
     else:
         token = sys.stdin.read().strip()
     if not token:
-        print("ai-lanes enroll: empty token", file=sys.stderr)
+        print("carpool enroll: empty token", file=sys.stderr)
         return 2
     probe = claude.probe_oauth_usage(token)
     if probe.get("status") != "ok":
-        print(f"ai-lanes enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
+        print(f"carpool enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
               "not storing. Is it fresh, and for the right account?", file=sys.stderr)
         return 1
     secret = config.secret_name_for(email)
     if not secret_store.set(secret, token):
-        print("ai-lanes enroll: secret store failed", file=sys.stderr)
+        print("carpool enroll: secret store failed", file=sys.stderr)
         return 1
     cfg.setdefault("enrolled", {})[email] = secret
     config.save(cfg)
@@ -350,20 +347,35 @@ def cmd_secret(args) -> int:
     name = config.secret_name_for(args.email, require_enrolled=True)
     if name is None:
         print(
-            f"ai-lanes secret: {args.email} is not enrolled in {config.accounts_path()}",
+            f"carpool secret: {args.email} is not enrolled in {config.accounts_path()}",
             file=sys.stderr,
         )
         return 1
     value = secret_store.get(name)
     if value is None:
-        print(f"ai-lanes secret: item unavailable for {args.email}", file=sys.stderr)
+        print(f"carpool secret: item unavailable for {args.email}", file=sys.stderr)
         return 1
     print(value)
     return 0
 
 
+def _bin(name: str) -> str:
+    return str(Path(__file__).resolve().parent.parent / "bin" / name)
+
+
+def _exec_tool(name: str, rest: list[str]) -> int:
+    """Replace this process with a sibling runner script."""
+    import os
+
+    path = _bin(name)
+    if not os.access(path, os.X_OK):
+        print(f"carpool: tool missing or not executable: {path}", file=sys.stderr)
+        return 2
+    os.execv(path, [path, *rest])
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="ai-lanes", description=__doc__,
+    parser = argparse.ArgumentParser(prog="carpool", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
 
@@ -374,27 +386,27 @@ def main(argv=None) -> int:
     p_capacity = sub.add_parser("capacity", help="5h + weekly headroom across both families")
     p_capacity.add_argument("--json", action="store_true")
 
-    p_pick = sub.add_parser("pick", help="best CODEX_HOME for dispatch")
+    p_pick = sub.add_parser(
+        "pick", help="best lane for dispatch: `pick codex` (home) or `pick claude` (email)"
+    )
+    p_pick.add_argument("family", nargs="?", choices=("codex", "claude"), default="codex")
     p_pick.add_argument("--json", action="store_true")
     p_pick.add_argument("--all", action="store_true", help="show full ranking")
     p_pick.add_argument("--cached", action="store_true")
-    p_pick.add_argument("--min-headroom", type=float, default=snapshot.DEFAULT_MIN_HEADROOM,
-                        help="minimum 5h-window headroom %% to qualify (default 5)")
+    p_pick.add_argument("--min-headroom", type=float, default=None,
+                        help="minimum headroom %% to qualify (default 5)")
     p_pick.add_argument("--handicap", type=float, default=10.0,
                         help="score penalty for the primary home ~/.codex (default 10)")
     p_pick.add_argument("--no-handicap", action="store_true",
                         help="rank purely by usage (may burn the primary account's window)")
 
-    p_cpick = sub.add_parser("claude-pick", help="best enrolled Claude lane (email) for dispatch")
-    p_cpick.add_argument("--json", action="store_true")
-    p_cpick.add_argument("--all", action="store_true", help="show full ranking")
-    p_cpick.add_argument("--cached", action="store_true", help="use last watchdog snapshot (no network)")
-    p_cpick.add_argument("--min-headroom", type=float, default=claude.DEFAULT_MIN_HEADROOM,
-                         help="minimum headroom %% required in EVERY window (default 5)")
-    p_cpick.add_argument("--handicap", type=float, default=claude.ACTIVE_HANDICAP,
-                         help="score penalty for the active desktop-login account (default 10)")
-    p_cpick.add_argument("--no-handicap", action="store_true",
-                         help="rank purely by usage (may burn the active login's window)")
+    for name, help_ in (
+        ("run", "capacity-aware delegate router"),
+        ("codex", "hardened Codex runner"),
+        ("claude", "hardened Claude runner"),
+    ):
+        p_tool = sub.add_parser(name, help=help_, add_help=False)
+        p_tool.add_argument("rest", nargs=argparse.REMAINDER)
 
     p_errors = sub.add_parser("errors", help="observed limit/auth errors")
     p_errors.add_argument("--hours", type=float, default=24)
@@ -423,17 +435,34 @@ def main(argv=None) -> int:
 
     argv = list(sys.argv[1:] if argv is None else argv)
     known = {
-        "status", "capacity", "pick", "claude-pick", "errors", "watch", "enroll",
+        "status", "capacity", "pick", "run", "codex", "claude", "errors", "watch", "enroll",
         "secret", "lane-usage",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
+    if argv[0] in ("run", "codex", "claude"):
+        rest = argv[1:]
+        if argv[0] == "run":
+            from . import delegate
+
+            return delegate.main(rest)
+        return _exec_tool(
+            {"codex": "carpool-codex", "claude": "carpool-claude"}[argv[0]], rest
+        )
     args = parser.parse_args(argv)
+    if args.command == "pick":
+        if args.family == "claude":
+            args.min_headroom = (
+                claude.DEFAULT_MIN_HEADROOM if args.min_headroom is None else args.min_headroom
+            )
+            return cmd_claude_pick(args)
+        args.min_headroom = (
+            snapshot.DEFAULT_MIN_HEADROOM if args.min_headroom is None else args.min_headroom
+        )
+        return cmd_pick(args)
     handlers = {
         "status": cmd_status,
         "capacity": cmd_capacity,
-        "pick": cmd_pick,
-        "claude-pick": cmd_claude_pick,
         "errors": cmd_errors,
         "watch": cmd_watch,
         "enroll": cmd_enroll,

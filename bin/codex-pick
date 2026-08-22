@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# Print the best currently available CODEX_HOME for dispatch.
-set -uo pipefail
-
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec "$SCRIPT_DIR/ai-lanes" pick "$@"

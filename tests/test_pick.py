@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from ai_lanes.snapshot import rank_for_dispatch
-from ai_lanes.util import now_local
+from carpool.snapshot import rank_for_dispatch
+from carpool.util import now_local
 
 
 def entry(home, used, weekly=20, verdict="ok", account="a", primary_home=False,

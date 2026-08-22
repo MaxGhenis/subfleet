@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from ai_lanes import claude, cli, config, secret_store
+from carpool import claude, cli, config, secret_store
 
 
 def test_help_exposes_generic_watch_without_removed_couplings(capsys):

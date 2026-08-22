@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ai-lanes CLI shim. Prefer the repository's managed environment, then python3.
+# carpool CLI shim. Prefer the repository's managed environment, then python3.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -15,6 +15,6 @@ if [ ! -x "$PY" ]; then
     fi
   done
 fi
-[ -n "$PY" ] || { echo "ai-lanes: Python 3.12 or newer is required" >&2; exit 2; }
+[ -n "$PY" ] || { echo "carpool: Python 3.12 or newer is required" >&2; exit 2; }
 
-cd "$ROOT" && exec "$PY" -m ai_lanes.cli "$@"
+cd "$ROOT" && exec "$PY" -m carpool.cli "$@"

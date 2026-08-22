@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ai_lanes import capacity, config, paths
+from carpool import capacity, config, paths
 
 
 NOW = datetime(2026, 7, 22, 16, 0, tzinfo=timezone.utc)

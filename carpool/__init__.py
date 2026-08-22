@@ -1,4 +1,4 @@
-"""ai-lanes — cross-account usage/quota + auth-stability monitor.
+"""carpool — cross-account usage/quota + auth-stability monitor.
 
 Covers multiple Codex CODEX_HOME lanes (distinct ChatGPT accounts) and Claude
 Code subscription lanes. It makes invisible quota and authentication state

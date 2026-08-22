@@ -160,6 +160,6 @@ def table(snap: dict) -> str:
         lines.append(
             f"  not enrolled ({len(unenrolled)}): "
             + ", ".join(a["email"].split("@")[1] for a in unenrolled)
-            + "  — enroll: claude setup-token | ai-lanes enroll <email>"
+            + "  — enroll: claude setup-token | carpool enroll <email>"
         )
     return "\n".join(lines)

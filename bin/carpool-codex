@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-run — hardened `codex exec` dispatch.
+# carpool codex — hardened `codex exec` dispatch.
 #
 # It protects long runs against three common failure modes:
 #   1. Sandbox git failures in linked worktrees: the git common directory is
@@ -12,7 +12,7 @@
 #      the worktree remain untouched.
 #
 # Usage:
-#   codex-run -H <codex_home> -m <model> -C <workdir> -p <prompt_file> -o <out_file> \
+#   carpool codex -H <codex_home> -m <model> -C <workdir> -p <prompt_file> -o <out_file> \
 #             [-s read-only|workspace-write] [-b <salvage_branch>] \
 #             [-R <salvage_remote>] [-r <max_retries>] [-e <effort>]
 #
@@ -38,9 +38,9 @@ while getopts "H:m:C:p:o:s:b:R:r:e:" opt; do
   esac
 done
 for req in CODEX_HOME_ARG MODEL WORKDIR PROMPT_FILE OUT_FILE; do
-  [ -n "${!req}" ] || { echo "codex-run: missing -${req:0:1}" >&2; exit 2; }
+  [ -n "${!req}" ] || { echo "carpool codex: missing -${req:0:1}" >&2; exit 2; }
 done
-[ -f "$PROMPT_FILE" ] || { echo "codex-run: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+[ -f "$PROMPT_FILE" ] || { echo "carpool codex: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
 ERR_FILE="${OUT_FILE%.md}.err.log"
 
 salvage() {
@@ -58,7 +58,7 @@ salvage() {
         tree=$(GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" write-tree 2>/dev/null)
         if [ -n "$tree" ]; then
           salvage_sha=$(git -C "$WORKDIR" commit-tree "$tree" -p "$parent" \
-            -m "WIP salvage: codex-run auto-commit (model=$MODEL)" 2>/dev/null)
+            -m "WIP salvage: carpool codex auto-commit (model=$MODEL)" 2>/dev/null)
         fi
       fi
       rm -f "$tmpidx"
@@ -67,16 +67,16 @@ salvage() {
         ts=$(date +%Y%m%d-%H%M%S)
         ref="refs/codex-salvage/${branch//\//-}-$ts-$$"
         git -C "$WORKDIR" update-ref "$ref" "$salvage_sha" 2>/dev/null \
-          && echo "codex-run: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
+          && echo "carpool codex: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
       else
-        echo "codex-run: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
+        echo "carpool codex: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
       fi
     fi
   fi
   if [ -n "$SALVAGE_BRANCH" ]; then
     local push_src="${salvage_sha:-HEAD}"
     git -C "$WORKDIR" push -qf "$SALVAGE_REMOTE" "$push_src:refs/heads/$SALVAGE_BRANCH" 2>/dev/null \
-      && echo "codex-run: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
+      && echo "carpool codex: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
   fi
 }
 trap salvage EXIT
@@ -99,19 +99,19 @@ while :; do
     --sandbox "$SANDBOX" ${EXTRA_CFG[@]+"${EXTRA_CFG[@]}"} -m "$MODEL" -C "$WORKDIR" -o "$OUT_FILE" \
     "$(cat "$PROMPT_FILE")" </dev/null >/dev/null 2>"$ERR_FILE"
   rc=$?
-  [ $rc -eq 0 ] && [ -s "$OUT_FILE" ] && { echo "codex-run: OK attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')"; exit 0; }
+  [ $rc -eq 0 ] && [ -s "$OUT_FILE" ] && { echo "carpool codex: OK attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')"; exit 0; }
 
   if grep -qiE "content filter|trusted access|can('|’)t (help|assist) with" "$ERR_FILE"; then
-    echo "codex-run: CONTENT-FILTERED — rewrite the prompt defensively (audit/verify framing, not construct/exploit). Not retrying." >&2
+    echo "carpool codex: CONTENT-FILTERED — rewrite the prompt defensively (audit/verify framing, not construct/exploit). Not retrying." >&2
     exit 3
   fi
   if [ $attempt -le $MAX_RETRIES ] && grep -qiE "capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out|temporarily" "$ERR_FILE"; then
     wait_s=$((60 * attempt))
-    echo "codex-run: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out' "$ERR_FILE")" >&2
+    echo "carpool codex: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out' "$ERR_FILE")" >&2
     sleep "$wait_s"
     continue
   fi
-  echo "codex-run: FAILED rc=$rc attempt=$attempt (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
+  echo "carpool codex: FAILED rc=$rc attempt=$attempt (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
   tail -3 "$ERR_FILE" >&2
   [ "$rc" -eq 0 ] && rc=1
   exit "$rc"

@@ -242,7 +242,7 @@ def probe_oauth_usage(token: str | None, timeout: float = 15.0, opener=None) -> 
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Accept": "application/json",
-            "User-Agent": "ai-lanes/0.1",
+            "User-Agent": "carpool/0.1",
         },
     )
 

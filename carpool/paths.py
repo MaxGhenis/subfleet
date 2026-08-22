@@ -38,11 +38,11 @@ def state_dir() -> Path:
 
 
 def claude_dir() -> Path:
-    return _env_path("AI_LANES_CLAUDE_DIR", Path.home() / ".claude")
+    return _env_path("CARPOOL_CLAUDE_DIR", Path.home() / ".claude")
 
 
 def claude_json() -> Path:
-    return _env_path("AI_LANES_CLAUDE_JSON", Path.home() / ".claude.json")
+    return _env_path("CARPOOL_CLAUDE_JSON", Path.home() / ".claude.json")
 
 
 def snapshot_path() -> Path:

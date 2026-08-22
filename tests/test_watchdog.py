@@ -1,8 +1,8 @@
 import json
 from datetime import timedelta
 
-from ai_lanes import config, watchdog
-from ai_lanes.util import load_json, now_local
+from carpool import config, watchdog
+from carpool.util import load_json, now_local
 
 from test_pick import entry
 
@@ -82,7 +82,7 @@ class TestConditions:
         s["codex"]["homes"][0]["probe"] = {"status": "token-revoked"}
         watchdog.run(snap=s)
         # Age the alert state past the re-alert window.
-        from ai_lanes import paths
+        from carpool import paths
 
         state = load_json(paths.alerts_path())
         for k in state:
@@ -149,7 +149,7 @@ class TestConditions:
                   entry("/h/.codex-3", 5, account="b")])
         summary = watchdog.run(snap=s)
         assert summary["alerts_sent"] == []
-        from ai_lanes import paths
+        from carpool import paths
 
         assert paths.snapshot_path().exists()
         assert paths.history_path().exists()
@@ -191,7 +191,7 @@ class TestConditions:
 
 class TestRender:
     def test_table_smoke(self, env_paths):
-        from ai_lanes import render
+        from carpool import render
 
         e_rev = entry("/h/.codex-2", 50, account="a", verdict="auth-revoked")
         e_rev["probe"] = {"status": "token-revoked"}

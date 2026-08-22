@@ -1,6 +1,6 @@
 # carpool
 
-> Renamed from `ai-lanes` on 2026-08-22 (the private stack it mirrors is now one package, `carpool`). This public snapshot still carries the `ai_lanes` package name and the pre-August tooling; a full port of the unified `carpool` CLI (lanes auto-assigned, app-home/lane split, free-plan guard, session-mirror health, `carpool login`) is in progress.
+> Formerly `ai-lanes`. The unified `carpool` behavior port is in progress.
 
 Run agentic AI work across multiple subscription accounts without rotating logins.
 

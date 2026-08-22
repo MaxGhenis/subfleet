@@ -1,4 +1,4 @@
-"""Shared configuration and state locations for ai-lanes.
+"""Shared configuration and state locations for carpool.
 
 The public configuration is a single ``accounts.json`` file.  Its required
 roster keys (``accounts`` and ``enrolled``) coexist with optional toolkit
@@ -23,8 +23,8 @@ class ConfigError(ValueError):
 
 
 def config_dir() -> Path:
-    value = os.environ.get("AI_LANES_CONFIG_DIR")
-    return Path(value).expanduser() if value else Path.home() / ".config" / "ai-lanes"
+    value = os.environ.get("CARPOOL_CONFIG_DIR")
+    return Path(value).expanduser() if value else Path.home() / ".config" / "carpool"
 
 
 def accounts_path() -> Path:
@@ -62,23 +62,23 @@ def save(value: dict[str, Any]) -> None:
 
 
 def state_dir() -> Path:
-    override = os.environ.get("AI_LANES_STATE_DIR")
+    override = os.environ.get("CARPOOL_STATE_DIR")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_STATE_HOME")
     root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return root / "ai-lanes"
+    return root / "carpool"
 
 
 def codex_homes_setting() -> list[Path] | None:
     """Return an explicit home list, or ``None`` for automatic discovery.
 
-    Presence of ``AI_LANES_CODEX_HOMES`` is significant: an empty value is an
+    Presence of ``CARPOOL_CODEX_HOMES`` is significant: an empty value is an
     explicit empty list and prevents accidental inspection of real homes in
     isolated environments.
     """
-    if "AI_LANES_CODEX_HOMES" in os.environ:
-        raw = os.environ["AI_LANES_CODEX_HOMES"]
+    if "CARPOOL_CODEX_HOMES" in os.environ:
+        raw = os.environ["CARPOOL_CODEX_HOMES"]
         return [Path(item).expanduser() for item in raw.split(os.pathsep) if item]
     try:
         document = load(strict=True)
@@ -94,8 +94,8 @@ def codex_homes_setting() -> list[Path] | None:
 
 
 def secret_name_prefix() -> str:
-    if "AI_LANES_SECRET_NAME_PREFIX" in os.environ:
-        return os.environ["AI_LANES_SECRET_NAME_PREFIX"]
+    if "CARPOOL_SECRET_NAME_PREFIX" in os.environ:
+        return os.environ["CARPOOL_SECRET_NAME_PREFIX"]
     value = load().get("secret_name_prefix", DEFAULT_SECRET_NAME_PREFIX)
     return value if isinstance(value, str) else DEFAULT_SECRET_NAME_PREFIX
 
@@ -111,8 +111,8 @@ def secret_name_for(email: str, *, require_enrolled: bool = False) -> str | None
 
 
 _COMMAND_ENV = {
-    "notify_cmd": "AI_LANES_NOTIFY_CMD",
-    "secret_store_cmd": "AI_LANES_SECRET_STORE_CMD",
+    "notify_cmd": "CARPOOL_NOTIFY_CMD",
+    "secret_store_cmd": "CARPOOL_SECRET_STORE_CMD",
 }
 
 

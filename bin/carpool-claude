@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-lane — hardened headless Claude Code dispatch pinned to an enrolled
+# carpool claude — hardened headless Claude Code dispatch pinned to an enrolled
 # account lane.
 #
 # It hardens four failure modes:
@@ -14,7 +14,7 @@
 #      .DOWNGRADED marker beside the output.
 #
 # Usage:
-#   claude-lane -a <email> | -A -C <workdir> -p <prompt_file> -o <out_file> \
+#   carpool claude -a <email> | -A -C <workdir> -p <prompt_file> -o <out_file> \
 #               [-m <model>] [-s workspace-write|read-only] \
 #               [-b <salvage_branch>] [-R <salvage_remote>] \
 #               [-r <max_retries>] [-d]
@@ -65,34 +65,31 @@ if [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] && [ -n "${CLAUDE_LANE_DETACHED_PROMPT:-}
   trap cleanup_detached_prompt EXIT
 fi
 
-[ -n "$EMAIL" ] || [ "$AUTO" = 1 ] || { echo "claude-lane: need -a <email> or -A" >&2; exit 2; }
-[ -n "$WORKDIR" ] || { echo "claude-lane: missing -C <workdir>" >&2; exit 2; }
-[ -n "$PROMPT_FILE" ] || { echo "claude-lane: missing -p <prompt_file>" >&2; exit 2; }
-[ -n "$OUT_FILE" ] || { echo "claude-lane: missing -o <out_file>" >&2; exit 2; }
-[ -d "$WORKDIR" ] || { echo "claude-lane: workdir not found: $WORKDIR" >&2; exit 2; }
-[ -f "$PROMPT_FILE" ] || { echo "claude-lane: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+[ -n "$EMAIL" ] || [ "$AUTO" = 1 ] || { echo "carpool claude: need -a <email> or -A" >&2; exit 2; }
+[ -n "$WORKDIR" ] || { echo "carpool claude: missing -C <workdir>" >&2; exit 2; }
+[ -n "$PROMPT_FILE" ] || { echo "carpool claude: missing -p <prompt_file>" >&2; exit 2; }
+[ -n "$OUT_FILE" ] || { echo "carpool claude: missing -o <out_file>" >&2; exit 2; }
+[ -d "$WORKDIR" ] || { echo "carpool claude: workdir not found: $WORKDIR" >&2; exit 2; }
+[ -f "$PROMPT_FILE" ] || { echo "carpool claude: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
 case "$SANDBOX" in
   workspace-write|read-only) ;;
-  *) echo "claude-lane: -s must be workspace-write or read-only" >&2; exit 2 ;;
+  *) echo "carpool claude: -s must be workspace-write or read-only" >&2; exit 2 ;;
 esac
-command -v jq >/dev/null || { echo "claude-lane: jq required" >&2; exit 2; }
-command -v uuidgen >/dev/null || { echo "claude-lane: uuidgen required" >&2; exit 2; }
+command -v jq >/dev/null || { echo "carpool claude: jq required" >&2; exit 2; }
+command -v uuidgen >/dev/null || { echo "carpool claude: uuidgen required" >&2; exit 2; }
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CLAUDE_BIN=${CLAUDE_LANE_CLAUDE:-claude}
-AI_LANES_BIN=${CLAUDE_LANE_AI_LANES:-$SCRIPT_DIR/ai-lanes}
-if [ ! -x "$AI_LANES_BIN" ]; then
-  AI_LANES_BIN=$(command -v "$AI_LANES_BIN" 2>/dev/null || command -v ai-lanes || true)
+CARPOOL_BIN=${CLAUDE_LANE_CARPOOL:-$SCRIPT_DIR/carpool}
+if [ ! -x "$CARPOOL_BIN" ]; then
+  CARPOOL_BIN=$(command -v "$CARPOOL_BIN" 2>/dev/null || command -v carpool || true)
 fi
-CLAUDE_PICK=${CLAUDE_LANE_PICK:-$SCRIPT_DIR/claude-pick}
-if [ ! -x "$CLAUDE_PICK" ]; then
-  CLAUDE_PICK=$(command -v "$CLAUDE_PICK" 2>/dev/null || command -v claude-pick || true)
-fi
+CLAUDE_PICK=${CLAUDE_LANE_PICK:-}
 CLAUDE_MODEL_BIN=""
 if [ -n "${CLAUDE_LANE_CLAUDE_MODEL:-}" ]; then
   CLAUDE_MODEL_BIN=$(command -v "$CLAUDE_LANE_CLAUDE_MODEL" 2>/dev/null || true)
 fi
-CLAUDE_DIR=${CLAUDE_LANE_CLAUDE_DIR:-${AI_LANES_CLAUDE_DIR:-$HOME/.claude}}
+CLAUDE_DIR=${CLAUDE_LANE_CLAUDE_DIR:-${CARPOOL_CLAUDE_DIR:-$HOME/.claude}}
 BACKOFF_BASE=${CLAUDE_LANE_BACKOFF:-60}
 
 BASE="${OUT_FILE%.md}"
@@ -101,13 +98,13 @@ RAW_FILE="$BASE.result.json"
 LANE_LOG="$BASE.lane.log"
 
 if [ "$DETACH" = 1 ] && [ -z "${CLAUDE_LANE_DETACHED:-}" ]; then
-  DETACHED_PROMPT=$(mktemp "${TMPDIR:-/tmp}/claude-lane-prompt.XXXXXX" 2>/dev/null) || {
-    echo "claude-lane: could not create a durable prompt copy for detached run" >&2
+  DETACHED_PROMPT=$(mktemp "${TMPDIR:-/tmp}/carpool claude-prompt.XXXXXX" 2>/dev/null) || {
+    echo "carpool claude: could not create a durable prompt copy for detached run" >&2
     exit 2
   }
   if ! cp "$PROMPT_FILE" "$DETACHED_PROMPT"; then
     rm -f "$DETACHED_PROMPT"
-    echo "claude-lane: could not copy prompt for detached run: $PROMPT_FILE" >&2
+    echo "carpool claude: could not copy prompt for detached run: $PROMPT_FILE" >&2
     exit 2
   fi
   export CLAUDE_LANE_DETACHED=1
@@ -116,7 +113,7 @@ if [ "$DETACH" = 1 ] && [ -z "${CLAUDE_LANE_DETACHED:-}" ]; then
     </dev/null >>"$LANE_LOG" 2>&1 &
   pid=$!
   disown "$pid" 2>/dev/null || true
-  echo "claude-lane: detached pid=$pid · log=$LANE_LOG · out=$OUT_FILE"
+  echo "carpool claude: detached pid=$pid · log=$LANE_LOG · out=$OUT_FILE"
   exit 0
 fi
 
@@ -135,7 +132,7 @@ salvage() {
         tree=$(GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" write-tree 2>/dev/null)
         if [ -n "$tree" ]; then
           salvage_sha=$(git -C "$WORKDIR" commit-tree "$tree" -p "$parent" \
-            -m "WIP salvage: claude-lane auto-commit (lane=${EMAIL:-unpicked} model=$MODEL)" 2>/dev/null)
+            -m "WIP salvage: carpool claude auto-commit (lane=${EMAIL:-unpicked} model=$MODEL)" 2>/dev/null)
         fi
       fi
       rm -f "$tmpidx"
@@ -144,16 +141,16 @@ salvage() {
         ts=$(date +%Y%m%d-%H%M%S)
         ref="refs/claude-salvage/${branch//\//-}-$ts-$$"
         git -C "$WORKDIR" update-ref "$ref" "$salvage_sha" 2>/dev/null \
-          && echo "claude-lane: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
+          && echo "carpool claude: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
       else
-        echo "claude-lane: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
+        echo "carpool claude: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
       fi
     fi
   fi
   if [ -n "$SALVAGE_BRANCH" ]; then
     local push_src="${salvage_sha:-HEAD}"
     git -C "$WORKDIR" push -qf "$SALVAGE_REMOTE" "$push_src:refs/heads/$SALVAGE_BRANCH" 2>/dev/null \
-      && echo "claude-lane: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
+      && echo "carpool claude: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
   fi
 }
 trap salvage EXIT
@@ -162,22 +159,26 @@ trap 'salvage; exit 143' TERM
 
 pick_lane() {
   local picked
-  [ -n "$CLAUDE_PICK" ] || return 1
-  picked=$("$CLAUDE_PICK") || return 1
+  if [ -n "$CLAUDE_PICK" ]; then
+    picked=$("$CLAUDE_PICK") || return 1
+  else
+    [ -n "$CARPOOL_BIN" ] || return 1
+    picked=$("$CARPOOL_BIN" pick claude) || return 1
+  fi
   [ -n "$picked" ] || return 1
   EMAIL=$picked
 }
 
 fetch_token() {
-  [ -n "$AI_LANES_BIN" ] || {
-    echo "claude-lane: ai-lanes command not found" >&2
+  [ -n "$CARPOOL_BIN" ] || {
+    echo "carpool claude: carpool command not found" >&2
     return 1
   }
-  TOKEN=$("$AI_LANES_BIN" secret get-for-account "$EMAIL" 2>/dev/null)
+  TOKEN=$("$CARPOOL_BIN" secret get-for-account "$EMAIL" 2>/dev/null)
   if [ -z "$TOKEN" ]; then
-    echo "claude-lane: no stored setup token for $EMAIL" >&2
-    echo "claude-lane: run claude setup-token while signed into $EMAIL" >&2
-    echo "claude-lane: then run ai-lanes enroll $EMAIL" >&2
+    echo "carpool claude: no stored setup token for $EMAIL" >&2
+    echo "carpool claude: run claude setup-token while signed into $EMAIL" >&2
+    echo "carpool claude: then run carpool enroll $EMAIL" >&2
     return 1
   fi
 }
@@ -191,7 +192,7 @@ transcript_path() {
 record_lane_usage() {
   local transcript
   transcript=$(transcript_path)
-  "$AI_LANES_BIN" lane-usage record --email "$EMAIL" --session-id "$SID" \
+  "$CARPOOL_BIN" lane-usage record --email "$EMAIL" --session-id "$SID" \
     --transcript "$transcript" >/dev/null 2>&1 || true
 }
 
@@ -200,9 +201,9 @@ record_hard_limit() {
   local args=(lane-usage hard-limit --email "$EMAIL" --session-id "$SID" \
     --error-file "$ERR_FILE")
   [ -s "$RAW_FILE" ] && args+=(--error-file "$RAW_FILE")
-  reset=$("$AI_LANES_BIN" "${args[@]}" 2>/dev/null || true)
+  reset=$("$CARPOOL_BIN" "${args[@]}" 2>/dev/null || true)
   if [ -n "$reset" ]; then
-    echo "claude-lane: hard limit reset=$reset" >&2
+    echo "carpool claude: hard limit reset=$reset" >&2
   fi
 }
 
@@ -232,7 +233,7 @@ inline_model_report() {
 check_model() {
   local report latest
   if [ -n "${CLAUDE_LANE_CLAUDE_MODEL:-}" ] && [ -z "$CLAUDE_MODEL_BIN" ]; then
-    echo "claude-lane: configured model checker not found — skipping served-model check" >&2
+    echo "carpool claude: configured model checker not found — skipping served-model check" >&2
     return 0
   fi
   if [ -n "$CLAUDE_MODEL_BIN" ]; then
@@ -242,23 +243,23 @@ check_model() {
   fi
   latest=$(printf '%s\n' "$report" | sed -n 's/^latest: //p' | tail -1)
   if [ -z "$latest" ]; then
-    echo "claude-lane: served-model check inconclusive (no transcript for session $SID?)" >&2
+    echo "carpool claude: served-model check inconclusive (no transcript for session $SID?)" >&2
     return 0
   fi
   case "$latest" in
     "$MODEL"|*"$MODEL"*)
-      echo "claude-lane: served by $latest (as requested)" >&2 ;;
+      echo "carpool claude: served by $latest (as requested)" >&2 ;;
     *)
       {
-        echo "claude-lane: MODEL-DOWNGRADE — lane served $latest, requested $MODEL (classifier fallback)."
-        echo "claude-lane: treat judgment or writing output as unverified and re-check it before use."
+        echo "carpool claude: MODEL-DOWNGRADE — lane served $latest, requested $MODEL (classifier fallback)."
+        echo "carpool claude: treat judgment or writing output as unverified and re-check it before use."
         printf '%s\n' "$report"
       } | tee "$BASE.DOWNGRADED" >&2 ;;
   esac
 }
 
 if [ "$AUTO" = 1 ] && [ -z "$EMAIL" ]; then
-  pick_lane || { echo "claude-lane: no dispatchable lane" >&2; exit 1; }
+  pick_lane || { echo "carpool claude: no dispatchable lane" >&2; exit 1; }
 fi
 fetch_token || exit 2
 
@@ -285,7 +286,7 @@ while :; do
       "$RAW_FILE" 2>/dev/null)" = "ok" ]; then
     jq -r '.result' "$RAW_FILE" > "$OUT_FILE"
     if [ -s "$OUT_FILE" ]; then
-      echo "claude-lane: OK lane=$EMAIL model=$MODEL attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ') session=$SID"
+      echo "carpool claude: OK lane=$EMAIL model=$MODEL attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ') session=$SID"
       check_model
       exit 0
     fi
@@ -295,9 +296,9 @@ while :; do
   [ -s "$RAW_FILE" ] && ERRTXT=("$ERR_FILE" "$RAW_FILE")
   if grep -qiE "401|unauthoriz|authentication_error|oauth token|token.*(revoked|expired)|invalid.*api.?key" \
       ${ERRTXT[@]+"${ERRTXT[@]}"}; then
-    echo "claude-lane: AUTH FAILURE on lane $EMAIL — the setup token is unusable; retrying cannot help." >&2
-    echo "claude-lane: run claude setup-token while signed into $EMAIL" >&2
-    echo "claude-lane: then run ai-lanes enroll $EMAIL" >&2
+    echo "carpool claude: AUTH FAILURE on lane $EMAIL — the setup token is unusable; retrying cannot help." >&2
+    echo "carpool claude: run claude setup-token while signed into $EMAIL" >&2
+    echo "carpool claude: then run carpool enroll $EMAIL" >&2
     exit 5
   fi
   if grep -qiE "usage limit|session limit|weekly limit|5-hour limit|limit reached|out of extra usage" \
@@ -305,24 +306,24 @@ while :; do
     record_hard_limit
     if [ "$AUTO" = 1 ] && [ $attempt -le $MAX_RETRIES ]; then
       OLD_EMAIL=$EMAIL
-      echo "claude-lane: lane $OLD_EMAIL hit a hard limit; re-picking (attempt $attempt/$MAX_RETRIES)" >&2
+      echo "carpool claude: lane $OLD_EMAIL hit a hard limit; re-picking (attempt $attempt/$MAX_RETRIES)" >&2
       if pick_lane && [ "$EMAIL" != "$OLD_EMAIL" ] && fetch_token; then
         continue
       fi
-      echo "claude-lane: no alternate lane available" >&2
+      echo "carpool claude: no alternate lane available" >&2
     fi
-    echo "claude-lane: LANE LIMITED (rc=$rc) — re-dispatch with -A or wait for the reset (claude-pick --json --all)." >&2
+    echo "carpool claude: LANE LIMITED (rc=$rc) — re-dispatch with -A or wait for the reset (claude-pick --json --all)." >&2
     exit 4
   fi
   if [ $attempt -le $MAX_RETRIES ] && grep -qiE \
       "rate limit|too many requests|429|overloaded|capacity|disconnect|connection|ECONN|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529" \
       ${ERRTXT[@]+"${ERRTXT[@]}"}; then
     wait_s=$((BACKOFF_BASE * attempt))
-    echo "claude-lane: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'rate limit|too many requests|429|overloaded|capacity|disconnect|connection[a-z ]*|ECONN[A-Z]*|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529' ${ERRTXT[@]+"${ERRTXT[@]}"} | head -1)" >&2
+    echo "carpool claude: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'rate limit|too many requests|429|overloaded|capacity|disconnect|connection[a-z ]*|ECONN[A-Z]*|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529' ${ERRTXT[@]+"${ERRTXT[@]}"} | head -1)" >&2
     sleep "$wait_s"
     continue
   fi
-  echo "claude-lane: FAILED rc=$rc attempt=$attempt lane=$EMAIL (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
+  echo "carpool claude: FAILED rc=$rc attempt=$attempt lane=$EMAIL (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
   tail -3 "$ERR_FILE" >&2
   [ -s "$RAW_FILE" ] && jq -r '.result // empty' "$RAW_FILE" 2>/dev/null | tail -2 >&2
   [ "$rc" -eq 0 ] && rc=1
