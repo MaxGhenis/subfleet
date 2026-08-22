@@ -156,6 +156,9 @@ def cmd_lane_usage(args) -> int:
                 session_id=args.session_id,
             )
             return 0
+        if args.action == "auth-failure":
+            capacity.record_auth_failure(args.email)
+            return 0
         text = "\n".join(
             Path(path).read_text(errors="replace")
             for path in args.error_file
@@ -620,6 +623,8 @@ def main(argv=None) -> int:
     p_usage_limit.add_argument("--email", required=True)
     p_usage_limit.add_argument("--session-id", required=True)
     p_usage_limit.add_argument("--error-file", action="append", default=[])
+    p_usage_auth = usage_sub.add_parser("auth-failure", help=argparse.SUPPRESS)
+    p_usage_auth.add_argument("--email", required=True)
 
     p_run_record = sub.add_parser("_record-run", help=argparse.SUPPRESS)
     p_run_record.add_argument("--phase", choices=("start", "update", "finish"), required=True)

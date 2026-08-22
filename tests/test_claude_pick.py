@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from carpool import claude, cli, config, snapshot, watchdog
+from carpool import capacity, claude, cli, config, snapshot, watchdog
 from carpool.claude import lane_verdict, lanes_fleet, rank_lanes
 from carpool.util import iso, now_local
 
@@ -362,6 +362,7 @@ def test_snapshot_uses_desktop_probe_and_ledger_for_enrolled_lanes(
         "accounts_report",
         lambda *args, **kwargs: pytest.fail("setup tokens must not be usage-probed"),
     )
+    monkeypatch.setattr(capacity.secret_store, "get", lambda name: "setup-token")
     seen = []
 
     def probe(token, timeout=15):

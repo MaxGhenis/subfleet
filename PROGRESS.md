@@ -30,8 +30,10 @@ The public rename, unified CLI, topology/health behavior, durable ledger, login 
 - Added `carpool login codex <N|app>` with configurable browser launching, private state permissions, a detached completion watcher, distinct numbered-lane validation, app-shadow reporting, public notifications, and a configurable status refresh.
 - Completed unified `mirror`, `brief`, and app-inclusive `errors` routing and added compact Markdown capacity rendering.
 - Unified Claude picking and status snapshots on the durable capacity ledger; inference-only setup tokens are no longer sent to the usage endpoint, expected enrollment responses are accepted, and successful re-enrollment clears stale cooldowns.
+- Hardened the Claude ledger to count normal and cached input tokens, ignore torn/non-finite records, retain legacy totals, and keep cooldown updates locked and monotonic.
+- Excluded malformed enrollments and missing secret-store items before dispatch, and made direct runner authentication failures persist the same 30-day cooldown as delegated runs.
 - Added free-plan and app-shadow handling to the normalized cross-provider capacity surface, classified Codex windows by duration, and filtered the app home and duplicate paths from explicit lane configuration.
-- Kept the expanded suite green (`339 passed in 24.08s`).
+- Kept the expanded suite green (`342 passed in 22.98s`).
 
 ## Next
 

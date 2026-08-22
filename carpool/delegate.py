@@ -18,7 +18,6 @@ from . import capacity, config
 from .util import atomic_write_json, parse_iso
 
 FABLE_PATTERNS = (
-    r"\bas max\b",
     r"\bvoice\b",
     r"\bemail\b",
     r"\bblog\b",
@@ -233,9 +232,7 @@ def pick_fable_lane(
 
 
 def record_cooldown(email: str, until: datetime) -> None:
-    data = _load_cooldowns()
-    data[email] = until.isoformat()
-    _save_cooldowns(data)
+    capacity.store_lane_cooldown(email, until)
 
 
 def _earliest_cooldown_reset() -> str | None:

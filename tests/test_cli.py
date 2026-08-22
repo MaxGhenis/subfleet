@@ -154,3 +154,15 @@ def test_enroll_rejects_bad_token_before_secret_store(monkeypatch, capsys):
     assert cli.main(["enroll", "beta@example.com"]) == 1
     assert config.load(strict=True)["enrolled"] == {}
     assert "rejected" in capsys.readouterr().err.lower()
+
+
+def test_lane_usage_auth_failure_records_cooldown(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli.capacity,
+        "record_auth_failure",
+        lambda email: seen.append(email) or True,
+    )
+
+    assert cli.main(["lane-usage", "auth-failure", "--email", "lane@example.com"]) == 0
+    assert seen == ["lane@example.com"]

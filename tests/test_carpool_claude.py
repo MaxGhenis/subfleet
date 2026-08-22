@@ -257,6 +257,9 @@ def test_auto_pick_excludes_missing_tokens_but_pinned_missing_token_is_rc5(tmp_p
 
     assert pinned.returncode == 5
     assert not Path(pinned_env["CLAUDE_RAN"]).exists()
+    assert [call[1] for call in _calls(pinned_paths["calls"], "lane-usage")] == [
+        "auth-failure"
+    ]
     finish = next(
         call
         for call in _calls(pinned_paths["calls"], "_record-run")
@@ -293,6 +296,21 @@ def test_reserved_rc4_and_rc5_require_text_classification(
         if _option(call, "--phase") == "finish"
     )
     assert _option(finish, "--rc") == str(expected_rc)
+
+
+def test_provider_auth_failure_persists_lane_cooldown_hook(tmp_path):
+    env, paths = _fixture(
+        tmp_path,
+        "printf '401 authentication_error\\n' >&2\nexit 4\n",
+    )
+
+    result = _run(env, paths, "-a", "alpha@example.com", "-r", "0")
+
+    assert result.returncode == 5
+    assert [call[1] for call in _calls(paths["calls"], "lane-usage")] == [
+        "record",
+        "auth-failure",
+    ]
 
 
 def test_rate_limit_reached_is_transient_not_a_hard_lane_limit(tmp_path):

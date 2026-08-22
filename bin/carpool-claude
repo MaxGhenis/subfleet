@@ -336,6 +336,7 @@ fetch_token() {
   }
   TOKEN=$("$CARPOOL_BIN" secret get-for-account "$EMAIL" 2>/dev/null)
   if [ -z "$TOKEN" ]; then
+    record_auth_failure
     echo "carpool claude: no stored setup token for $EMAIL" >&2
     echo "carpool claude: run claude setup-token while signed into $EMAIL" >&2
     echo "carpool claude: then run carpool enroll $EMAIL" >&2
@@ -366,6 +367,11 @@ record_lane_usage() {
   transcript=$(transcript_path)
   "$CARPOOL_BIN" lane-usage record --email "$EMAIL" --session-id "$SID" \
     --transcript "$transcript" >/dev/null 2>&1 || true
+}
+
+record_auth_failure() {
+  [ -n "$CARPOOL_BIN" ] || return 0
+  "$CARPOOL_BIN" lane-usage auth-failure --email "$EMAIL" >/dev/null 2>&1 || true
 }
 
 record_hard_limit() {
@@ -483,6 +489,7 @@ while :; do
   [ -s "$RAW_FILE" ] && ERRTXT=("$ERR_FILE" "$RAW_FILE")
   if grep -qiE "401|unauthoriz|authentication_error|oauth token|token.*(revoked|expired)|invalid.*api.?key" \
       ${ERRTXT[@]+"${ERRTXT[@]}"}; then
+    record_auth_failure
     echo "carpool claude: AUTH FAILURE on lane $EMAIL — the setup token is unusable; retrying cannot help." >&2
     echo "carpool claude: run claude setup-token while signed into $EMAIL" >&2
     echo "carpool claude: then run carpool enroll $EMAIL" >&2

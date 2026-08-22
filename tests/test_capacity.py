@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -34,10 +35,20 @@ def test_transcript_last_message_occurrence_wins_and_append_errors(tmp_path):
                     "sessionId": "session-1",
                     "message": {"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 2}},
                 },
-                {"message": {"id": "m2", "usage": {"input_tokens": 7, "output_tokens": 3}}},
+                {
+                    "message": {
+                        "id": "m2",
+                        "usage": {
+                            "input_tokens": 7,
+                            "cache_creation_input_tokens": 5,
+                            "cache_read_input_tokens": 3,
+                            "output_tokens": 3,
+                        },
+                    }
+                },
                 {"message": {"id": "m1", "usage": {"input_tokens": 11, "output_tokens": 5}}},
             )
-        )
+        ) + "\n{not json\n"
     )
     ledger = tmp_path / "lane-usage.jsonl"
 
@@ -48,11 +59,11 @@ def test_transcript_last_message_occurrence_wins_and_append_errors(tmp_path):
 
     assert parsed == {
         "session_id": "session-1",
-        "input_tokens": 18,
+        "input_tokens": 26,
         "output_tokens": 8,
-        "total_tokens": 26,
+        "total_tokens": 34,
     }
-    assert appended["total_tokens"] == 26
+    assert appended["total_tokens"] == 34
 
     broken = tmp_path / "broken.jsonl"
     broken.write_text("{not json\n")
@@ -68,6 +79,27 @@ def test_transcript_last_message_occurrence_wins_and_append_errors(tmp_path):
     assert "error" in error
     assert "no message usage" in missing["error"]
     assert records == [appended, error, missing]
+
+
+def test_rolling_sums_fall_back_to_legacy_fields_and_ignore_bad_numbers():
+    email = "lane@example.com"
+    entries = [
+        {
+            "ts": at(timedelta()),
+            "email": email,
+            "input_tokens": 3,
+            "output_tokens": 4,
+        },
+        token_record(email, timedelta(), float("nan")),
+        token_record(email, timedelta(), float("inf")),
+        token_record(email, timedelta(), 10 ** 400),
+        token_record(email, timedelta(), 7),
+    ]
+
+    assert capacity.rolling_token_sums(email, now=NOW, entries=entries) == {
+        "five_hour": 14,
+        "weekly": 14,
+    }
 
 
 def test_rolling_windows_are_inclusive_and_ignore_future_errors_and_events():
@@ -405,8 +437,65 @@ def test_cooldown_updates_are_locked_case_insensitive_and_never_shorten(tmp_path
 
     stored = json.loads(path.read_text())
     assert stored == {"Lane@Example.com": at(timedelta(days=30))}
+    emails = [f"lane-{index}@example.com" for index in range(8)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert all(
+            executor.map(
+                lambda email: capacity.store_lane_cooldown(
+                    email, NOW + timedelta(hours=2), path=path
+                ),
+                emails,
+            )
+        )
+    assert set(emails) <= set(json.loads(path.read_text()))
     assert capacity.clear_lane_cooldown("LANE@example.com", path=path)
-    assert json.loads(path.read_text()) == {}
+    assert set(json.loads(path.read_text())) == set(emails)
+
+
+def test_auth_failure_extends_lane_cooldown_for_thirty_days(tmp_path):
+    path = tmp_path / "cooldowns.json"
+
+    assert capacity.record_auth_failure("lane@example.com", ts=NOW, path=path)
+
+    assert json.loads(path.read_text()) == {
+        "lane@example.com": at(timedelta(days=30))
+    }
+
+
+def test_malformed_enrollments_and_missing_secrets_are_not_dispatchable():
+    config.save(
+        {
+            "accounts": [
+                "valid@example.com",
+                "missing@example.com",
+                "null@example.com",
+                "empty@example.com",
+            ],
+            "enrolled": {
+                "valid@example.com": "secret-valid",
+                "missing@example.com": "secret-missing",
+                "null@example.com": None,
+                "empty@example.com": "  ",
+            },
+            "codex_homes": [],
+        }
+    )
+    live = {"codex": [], "claude": {"identity": {}, "probe": {"status": "skipped"}}}
+
+    rows = capacity.account_rows(
+        live,
+        now=NOW,
+        entries=[],
+        cooldowns={},
+        secret_lookup_fn=lambda name: "token" if name == "secret-valid" else None,
+    )
+    by_email = {row["email"]: row for row in rows}
+
+    assert by_email["valid@example.com"]["dispatchable"] is True
+    assert by_email["missing@example.com"]["status"] == "secret-missing"
+    assert by_email["missing@example.com"]["dispatchable"] is False
+    assert by_email["null@example.com"]["enrolled"] is False
+    assert by_email["empty@example.com"]["enrolled"] is False
 
 
 def test_claude_email_matching_is_case_insensitive_and_preserves_config_spelling():
@@ -640,6 +729,7 @@ def test_build_uses_tmp_state_paths_and_has_report_shape(tmp_path):
             "five_hour": {"used_percent": 10},
             "seven_day": {"used_percent": 20},
         },
+        secret_lookup_fn=lambda name: "setup-token",
     )
 
     assert set(report) == {"generated_at", "cache", "accounts", "families"}

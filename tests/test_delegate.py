@@ -9,7 +9,6 @@ from carpool import config, delegate
 
 
 @pytest.mark.parametrize(("prompt", "kind", "model"), [
-    ("Answer as Max", "fable", "fable"),
     ("Match this voice", "fable", "fable"),
     ("Prepare an email", "fable", "fable"),
     ("Create a blog", "fable", "fable"),
@@ -31,7 +30,6 @@ from carpool import config, delegate
     ("Evaluate this patch", "review", "sol"),
     ("Referee this dispute", "review", "sol"),
     ("Final review before we implement the fix", "fable", "fable"),
-    ("As Max, for each file check and implement it", "fable", "fable"),
     ("Audit and implement the fix", "review", "sol"),
     ("For each file, check imports", "sweep", "terra"),
     ("Extract ids across all rows", "sweep", "terra"),
@@ -137,6 +135,7 @@ def test_rotation_persists_skips_cooldown_and_expiry(isolated):
     assert delegate.pick_fable_lane() == "beta@example.com"
     delegate.record_cooldown("charlie@example.com", delegate._now() + timedelta(hours=1))
     assert delegate.pick_fable_lane() == "delta@example.com"
+    delegate.capacity.clear_lane_cooldown("charlie@example.com")
     delegate.record_cooldown("charlie@example.com", delegate._now() - timedelta(seconds=1))
     assert delegate.pick_fable_lane() == "alpha@example.com"
     assert json.loads((isolated / "rotation.json").read_text())["last_used"] == "alpha@example.com"

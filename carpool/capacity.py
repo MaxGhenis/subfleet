@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import claude, codex, config, paths, run_ledger
+from . import claude, codex, config, paths, run_ledger, secret_store
 from .util import atomic_write_json, iso, load_json, now_local, parse_iso, strip_private
 
 LIVE_CACHE_TTL_SECONDS = 120
@@ -25,6 +26,7 @@ MIN_DISPATCH_HEADROOM = 5.0
 PROTECTED_ACCOUNT_HANDICAP = 10.0
 FIVE_HOURS = timedelta(hours=5)
 SEVEN_DAYS = timedelta(days=7)
+AUTH_FAILURE_COOLDOWN = timedelta(days=30)
 
 
 def _aware(value: datetime) -> datetime:
@@ -42,13 +44,14 @@ def _timestamp(value: datetime | str | None) -> str:
 
 
 def _token_count(value: Any) -> int | None:
-    if isinstance(value, bool) or value is None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
+        finite = float(value)
         number = int(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return number if number >= 0 else None
+    return number if math.isfinite(finite) and number >= 0 else None
 
 
 def _email_key(value: Any) -> str | None:
@@ -65,10 +68,22 @@ def _record_matches_email(record: Any, email: str) -> bool:
 def _successful_usage_record(record: Any) -> bool:
     return (
         isinstance(record, dict)
-        and not record.get("error")
-        and not record.get("event")
-        and _token_count(record.get("total_tokens")) is not None
+        and _usage_total(record) is not None
     )
+
+
+def _usage_total(record: dict) -> int | None:
+    """Read current or legacy ledger totals without accepting bad numbers."""
+    if record.get("error") or record.get("event"):
+        return None
+    total = _token_count(record.get("total_tokens"))
+    if total is not None:
+        return total
+    input_tokens = _token_count(record.get("input_tokens"))
+    output_tokens = _token_count(record.get("output_tokens"))
+    if input_tokens is None and output_tokens is None:
+        return None
+    return (input_tokens or 0) + (output_tokens or 0)
 
 
 def read_ledger(path: Path | str | None = None) -> list[dict]:
@@ -160,6 +175,18 @@ def clear_lane_cooldown(
         return False
 
 
+def record_auth_failure(
+    email: str,
+    *,
+    ts: datetime | str | None = None,
+    path: Path | str | None = None,
+) -> bool:
+    """Keep a known-bad Claude setup token out of rotation for 30 days."""
+    observed = parse_iso(ts) if isinstance(ts, str) else ts
+    event_time = _aware(observed) if isinstance(observed, datetime) else now_local()
+    return store_lane_cooldown(email, event_time + AUTH_FAILURE_COOLDOWN, path=path)
+
+
 def parse_transcript_usage(
     transcript_path: Path | str, *, session_id: str | None = None
 ) -> dict[str, Any]:
@@ -178,8 +205,8 @@ def parse_transcript_usage(
                 continue
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid JSON at line {line_number}: {exc.msg}") from exc
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
             if not isinstance(record, dict):
                 continue
             discovered_session = (
@@ -189,21 +216,30 @@ def parse_transcript_usage(
             )
             message = record.get("message")
             message = message if isinstance(message, dict) else {}
+            message_id = message.get("id")
             usage = message.get("usage")
-            if not isinstance(usage, dict):
-                usage = record.get("usage")
-            if not isinstance(usage, dict):
+            if not isinstance(message_id, str) or not isinstance(usage, dict):
                 continue
-            message_id = (
-                message.get("id")
-                or record.get("message_id")
-                or record.get("messageId")
-                or record.get("uuid")
-                or f"line:{line_number}"
+            input_tokens = sum(
+                _token_count(usage.get(key)) or 0
+                for key in (
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
             )
-            input_tokens = _token_count(usage.get("input_tokens")) or 0
             output_tokens = _token_count(usage.get("output_tokens")) or 0
-            by_message[str(message_id)] = (input_tokens, output_tokens)
+            if input_tokens == 0 and output_tokens == 0 and not any(
+                key in usage
+                for key in (
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                    "output_tokens",
+                )
+            ):
+                continue
+            by_message[message_id] = (input_tokens, output_tokens)
 
     if not by_message:
         raise ValueError("transcript contains no message usage records")
@@ -260,7 +296,7 @@ def rolling_token_sums(
         if record.get("error") or record.get("event"):
             continue
         observed = parse_iso(record.get("ts"))
-        tokens = _token_count(record.get("total_tokens"))
+        tokens = _usage_total(record)
         if observed is None or tokens is None:
             continue
         observed = _aware(observed)
@@ -612,6 +648,7 @@ def account_rows(
     cooldowns_path: Path | str | None = None,
     enrolled: Mapping[str, Any] | Iterable[str] | None = None,
     known_accounts: Iterable[str] | None = None,
+    secret_lookup_fn: Callable[[str], str | None] | None = None,
 ) -> list[dict]:
     """Normalize live probes, lane estimates, calibration, and cooldown state."""
     current = _resolve_now(now)
@@ -622,21 +659,46 @@ def account_rows(
         cooldowns = value if isinstance(value, dict) else {}
 
     cfg = config.load()
-    if enrolled is None:
+    enrollment_from_config = enrolled is None
+    if enrollment_from_config:
         value = cfg.get("enrolled") or {}
         enrolled = value if isinstance(value, dict) else {}
     if isinstance(enrolled, Mapping):
-        enrolled_values = list(enrolled.keys())
+        enrollment_items = [
+            (email, secret.strip())
+            for email, secret in enrolled.items()
+            if isinstance(email, str)
+            and "@" in email
+            and isinstance(secret, str)
+            and secret.strip()
+        ]
     elif isinstance(enrolled, str):
-        enrolled_values = [enrolled]
+        enrollment_items = [(enrolled, None)] if "@" in enrolled else []
     else:
-        enrolled_values = list(enrolled)
+        enrollment_items = [
+            (email, None)
+            for email in enrolled
+            if isinstance(email, str) and "@" in email
+        ]
+    enrolled_values = [email for email, _secret in enrollment_items]
     enrolled_by_key = {
-        key: value.strip()
-        for value in enrolled_values
-        if (key := _email_key(value)) is not None
+        key: email.strip()
+        for email in enrolled_values
+        if (key := _email_key(email)) is not None
+    }
+    secret_by_key = {
+        key: secret
+        for email, secret in enrollment_items
+        if (key := _email_key(email)) is not None and secret is not None
     }
     enrolled_keys = set(enrolled_by_key)
+    lookup = secret_lookup_fn or secret_store.get
+    secret_available_by_key = {
+        key: bool(lookup(secret))
+        for key, secret in secret_by_key.items()
+    } if enrollment_from_config or secret_lookup_fn is not None else {
+        key: True for key in enrolled_keys
+    }
     if known_accounts is None:
         value = cfg.get("accounts") or []
         known_accounts = value if isinstance(value, list) else []
@@ -722,9 +784,13 @@ def account_rows(
                     resets.append(reset)
         limited_until = iso(max(resets)) if resets else None
         is_enrolled = email_key in enrolled_keys
+        secret_available = secret_available_by_key.get(email_key, True)
+        if is_enrolled and not secret_available:
+            status = "secret-missing"
         resource = enrolled_by_key.get(email_key, email)
         dispatchable = (
             is_enrolled
+            and secret_available
             and limited_until is None
             and not pending_limit_resets
             and not live_exhausted
@@ -747,6 +813,7 @@ def account_rows(
                 "status": status,
                 "active": active,
                 "enrolled": is_enrolled,
+                "secret_available": secret_available if is_enrolled else None,
                 "pending_hard_limit": bool(pending_limit_resets),
             }
         )
@@ -978,6 +1045,7 @@ def build(
     claude_identity_fn: Callable[[], dict] | None = None,
     keychain_fn: Callable[[], dict] | None = None,
     claude_probe_fn: Callable[..., dict] | None = None,
+    secret_lookup_fn: Callable[[str], str | None] | None = None,
 ) -> dict:
     """Build the normalized capacity report used by CLI and delegate."""
     current = _resolve_now(clock=clock)
@@ -999,6 +1067,7 @@ def build(
         now=current,
         ledger_path=ledger_path,
         cooldowns_path=cooldowns_path,
+        secret_lookup_fn=secret_lookup_fn,
     )
     return {
         "generated_at": iso(current),
