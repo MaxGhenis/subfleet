@@ -1,11 +1,13 @@
-# ai-lanes
+# carpool
+
+> Renamed from `ai-lanes` on 2026-08-22 (the private stack it mirrors is now one package, `carpool`). This public snapshot still carries the `ai_lanes` package name and the pre-August tooling; a full port of the unified `carpool` CLI (lanes auto-assigned, app-home/lane split, free-plan guard, session-mirror health, `carpool login`) is in progress.
 
 Run agentic AI work across multiple subscription accounts without rotating logins.
 
 If you use Claude Code and Codex on consumer subscriptions, capacity comes in
 per-account windows. When one account hits a limit, the usual move is logging
 out and back in as another — which kills running agents and eats your time.
-ai-lanes replaces login rotation with *lanes*: each account's identity lives in
+carpool replaces login rotation with *lanes*: each account's identity lives in
 a token, workers pin an identity per process, and a router picks lanes for you.
 
 ## What's in the box
