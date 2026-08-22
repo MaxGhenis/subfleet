@@ -11,13 +11,15 @@ from .util import atomic_write_json, iso, now_local, parse_iso, strip_private
 DEFAULT_MIN_HEADROOM = 5.0
 
 
-def _codex_verdict(auth: dict, probe: dict, observed: dict | None) -> str:
+def codex_verdict(auth: dict, probe: dict, observed: dict | None) -> str:
     if auth.get("status") != "ok":
         return "no-auth"
     status = probe.get("status")
     if status == "token-revoked":
         return "auth-revoked"
     if status == "ok":
+        if codex.plan_is_free(probe.get("plan_type")):
+            return "free-plan"
         if probe.get("limit_reached") or (probe.get("allowed") is False):
             return "limited"
         return "ok"
@@ -25,6 +27,50 @@ def _codex_verdict(auth: dict, probe: dict, observed: dict | None) -> str:
     if status and status.startswith("http-4"):
         return "auth-suspect"
     return "unknown"
+
+
+# Compatibility for callers from the public snapshot.
+_codex_verdict = codex_verdict
+
+
+def effective_windows(probe_result: dict, observed: dict | None) -> dict:
+    """Select live windows, or the latest observed fallback, by duration."""
+    if probe_result.get("status") == "ok":
+        five_hour, weekly = codex.classify_windows(
+            probe_result.get("primary"), probe_result.get("secondary")
+        )
+        if five_hour is None and weekly is None:
+            five_hour, weekly = probe_result.get("primary"), probe_result.get("secondary")
+        return {
+            "primary": five_hour,
+            "secondary": weekly,
+            "five_hour": five_hour,
+            "weekly": weekly,
+            "source": "live",
+            "as_of": probe_result.get("checked_at"),
+        }
+    if observed:
+        five_hour, weekly = codex.classify_windows(
+            observed.get("primary"), observed.get("secondary")
+        )
+        if five_hour is None and weekly is None:
+            five_hour, weekly = observed.get("primary"), observed.get("secondary")
+        return {
+            "primary": five_hour,
+            "secondary": weekly,
+            "five_hour": five_hour,
+            "weekly": weekly,
+            "source": "observed",
+            "as_of": observed.get("observed_at"),
+        }
+    return {
+        "primary": None,
+        "secondary": None,
+        "five_hour": None,
+        "weekly": None,
+        "source": "none",
+        "as_of": None,
+    }
 
 
 def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24,
@@ -54,21 +100,11 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
         if probe_result.get("status") != "ok":
             observed = codex.latest_rollout_rate_limits(home)
         errors = codex.recent_limit_errors(home, hours=errors_hours)
-        verdict = _codex_verdict(auth, probe_result, observed)
+        verdict = codex_verdict(auth, probe_result, observed)
         acct = auth.get("account_id")
         if acct:
             by_account.setdefault(acct, []).append(str(home))
-        # Effective window data: live if we have it, else last observed.
-        if probe_result.get("status") == "ok":
-            eff = {"primary": probe_result.get("primary"),
-                   "secondary": probe_result.get("secondary"),
-                   "source": "live", "as_of": probe_result.get("checked_at")}
-        elif observed:
-            eff = {"primary": observed.get("primary"),
-                   "secondary": observed.get("secondary"),
-                   "source": "observed", "as_of": observed.get("observed_at")}
-        else:
-            eff = {"primary": None, "secondary": None, "source": "none", "as_of": None}
+        eff = effective_windows(probe_result, observed)
         home_entries.append(
             {
                 "home": str(home),
@@ -100,6 +136,27 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
                 )
             seen.add(acct)
 
+    app_auth = codex.app_home_identity()
+    app_account_id = app_auth.get("account_id")
+    app_email = app_auth.get("email")
+    shadows = [
+        entry["home"]
+        for entry in home_entries
+        if (
+            app_account_id
+            and entry.get("account_id")
+            and str(entry["account_id"]).casefold() == str(app_account_id).casefold()
+        )
+        or (
+            not app_account_id
+            and app_email
+            and entry.get("email")
+            and str(entry["email"]).casefold() == str(app_email).casefold()
+        )
+    ]
+    for entry in home_entries:
+        entry["shadowed_by_app"] = entry["home"] in shadows
+
     dispatchable = [
         e for e in home_entries
         if e["verdict"] == "ok" and not e["duplicate_of"]
@@ -114,6 +171,15 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
 
     codex_section = {
         "homes": home_entries,
+        "app_home": {
+            "home": str(paths.app_codex_home()),
+            "status": app_auth.get("status"),
+            "account_id": app_account_id,
+            "email": app_email,
+            "plan": app_auth.get("plan"),
+            "auth_last_refresh": app_auth.get("last_refresh"),
+            "shadows": shadows,
+        },
         "duplicates": duplicates,
         "fleet": {
             "total_homes": len(home_entries),
@@ -208,6 +274,7 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
         "tier": creds.get("tier"),
         "keychain": {k: v for k, v in creds.items() if not k.startswith("_")},
         "oauth_probe": {k: v for k, v in cprobe.items() if k != "raw"},
+        "session_mirror": claude.session_mirror_health(now=now),
         "recent_errors": events[:8],
         "active_limit": active,
         "verdict": claude_verdict,
@@ -223,7 +290,8 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
 
 
 def _headroom(entry: dict) -> float | None:
-    primary = entry.get("windows", {}).get("primary")
+    windows = entry.get("windows", {})
+    primary = windows.get("five_hour") or windows.get("primary") or windows.get("weekly")
     if not primary or primary.get("used_percent") is None:
         return None
     return 100.0 - float(primary["used_percent"])
@@ -242,11 +310,13 @@ def rank_for_dispatch(home_entries: list[dict], handicap: float = 10.0,
                       stale_max_min: float = 30.0) -> list[dict]:
     """Order dispatchable homes best-first. Distinct-account aware (duplicate
     homes excluded), window-aware, with a configurable handicap that spares the
-    primary home (its account may back interactive ChatGPT/Codex apps).
+    protected interactive account. The live app-home identity wins over the
+    configured fallback, so the handicap follows the account across relogins.
 
     A home with a failed live probe still qualifies on rollout data observed
     within `stale_max_min`, flagged stale so callers can decide."""
     now = now_local()
+    protected = codex.protected_account()
     candidates = []
     for e in home_entries:
         if e.get("duplicate_of"):
@@ -270,8 +340,15 @@ def rank_for_dispatch(home_entries: list[dict], handicap: float = 10.0,
         if headroom is None or headroom < min_headroom:
             continue
         used = 100.0 - headroom
-        score = used + (handicap if e.get("is_primary_home") else 0.0)
-        secondary = (e["windows"].get("secondary") or {}).get("used_percent") or 0.0
+        spared = (
+            codex.is_protected_account(e.get("email"), e.get("account_id"), protected)
+            if protected is not None
+            else bool(e.get("is_primary_home"))
+        )
+        score = used + (handicap if spared else 0.0)
+        secondary = (
+            e["windows"].get("weekly") or e["windows"].get("secondary") or {}
+        ).get("used_percent") or 0.0
         candidates.append(
             {
                 "home": e["home"],
@@ -280,6 +357,7 @@ def rank_for_dispatch(home_entries: list[dict], handicap: float = 10.0,
                 "five_hour_used_percent": used,
                 "weekly_used_percent": secondary,
                 "stale": stale,
+                "protected": spared,
                 "as_of": e["windows"].get("as_of"),
                 "score": round(score, 2),
             }

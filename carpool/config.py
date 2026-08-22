@@ -113,7 +113,24 @@ def secret_name_for(email: str, *, require_enrolled: bool = False) -> str | None
 _COMMAND_ENV = {
     "notify_cmd": "CARPOOL_NOTIFY_CMD",
     "secret_store_cmd": "CARPOOL_SECRET_STORE_CMD",
+    "mirror_restart_cmd": "CARPOOL_MIRROR_RESTART_CMD",
 }
+
+
+def path(key: str, env_name: str, default: Path) -> Path:
+    """Return a path override from the environment or ``accounts.json``."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        raw = load().get(key)
+    return Path(raw).expanduser() if isinstance(raw, str) and raw else default
+
+
+def mirror_job_label() -> str | None:
+    """Optional scheduler job identifier used only as an extra health signal."""
+    raw = os.environ.get("CARPOOL_MIRROR_JOB_LABEL")
+    if raw is None:
+        raw = load().get("mirror_job_label")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
 def command(key: str) -> list[str] | None:

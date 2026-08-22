@@ -81,7 +81,8 @@ class TestCodexHomes:
 
     def test_default_discovery_globs_all_numeric_suffixes(self, tmp_path, monkeypatch):
         home = tmp_path / "discovery-home"
-        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(paths, "HOME", home)
+        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(home / ".codex"))
         home.mkdir()
         for name in (".codex", ".codex-10", ".codex-2"):
             (home / name).mkdir()
@@ -89,7 +90,9 @@ class TestCodexHomes:
         (home / ".codex-4").write_text("not a directory")
         config.save(BASE)
 
-        assert paths.codex_homes() == [home / ".codex", home / ".codex-2", home / ".codex-10"]
+        assert paths.codex_homes() == [home / ".codex-2", home / ".codex-10"]
+        assert paths.app_codex_home() == home / ".codex"
+        assert paths.app_codex_home() not in paths.codex_homes()
 
 
 class TestSecretNamesAndCommands:

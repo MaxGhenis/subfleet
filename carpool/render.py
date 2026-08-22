@@ -8,6 +8,7 @@ VERDICT_LABELS = {
     "auth-revoked": "AUTH-REVOKED",
     "auth-suspect": "AUTH-SUSPECT",
     "no-auth": "NO-AUTH",
+    "free-plan": "FREE-PLAN (not a dispatch lane)",
     "unknown": "UNKNOWN",
 }
 
@@ -58,6 +59,23 @@ def table(snap: dict) -> str:
             lines.append(
                 f"  {'':<11} refresh-token-revoked error seen {fmt_clock(parse_iso(err['observed_at']), now)}"
             )
+    app_home = snap["codex"].get("app_home")
+    if app_home:
+        if app_home.get("status") == "ok" and (
+            app_home.get("email") or app_home.get("account_id")
+        ):
+            identity = app_home.get("email") or (app_home.get("account_id") or "?")[:12]
+            shadows = app_home.get("shadows") or []
+            note = (
+                " — same account as "
+                + ", ".join(_short_home(home) for home in shadows)
+                + " (lane shadowed, handicapped)"
+                if shadows
+                else " — not a lane account"
+            )
+            lines.append(f"  app {_short_home(app_home['home']):<8} {identity}{note}")
+        else:
+            lines.append(f"  app {_short_home(app_home['home']):<8} (no login)")
     fleet = snap["codex"]["fleet"]
     best = fleet.get("best_home")
     fleet_line = f"  fleet: {fleet['dispatchable_now']}/{fleet['total_homes']} dispatchable"
@@ -110,6 +128,17 @@ def table(snap: dict) -> str:
         lines.append(
             f"  keychain OAuth token: INVALID (expired {kc.get('expires_at', '?')[:10]})"
             " — informational; live sessions authenticate separately"
+        )
+    mirror = c.get("session_mirror") or {}
+    if mirror.get("status") == "stalled":
+        if mirror.get("job_loaded") is False:
+            detail = "configured scheduler job is not loaded"
+        elif mirror.get("run_min") is not None:
+            detail = f"run hung for {mirror['run_min']} min"
+        else:
+            detail = f"heartbeat idle {mirror.get('age_min', '?')} min"
+        lines.append(
+            f"  session mirror STALLED ({detail}); heal: carpool mirror --quiet"
         )
     accounts = c.get("accounts") or []
     fleet_c = c.get("lanes") or {}

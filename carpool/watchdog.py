@@ -14,7 +14,9 @@ Alerting contract (incident 2026-07-11 postmortem):
 """
 
 import json
-from . import notify, paths, snapshot
+import shlex
+
+from . import config, notify, paths, snapshot
 from .util import atomic_write_json, fmt_clock, load_json, now_local, parse_iso
 
 REALERT_HOURS = 6
@@ -28,6 +30,12 @@ def _short(home: str) -> str:
     import pathlib
 
     return home.replace(str(pathlib.Path.home()), "~")
+
+
+def _login_command(home: str) -> str:
+    name = __import__("pathlib").Path(home).name
+    target = name.removeprefix(".codex-") if name.startswith(".codex-") else "<lane>"
+    return f"carpool login codex {target}"
 
 
 def evaluate_conditions(snap: dict) -> list[dict]:
@@ -104,6 +112,23 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 }
             )
 
+        if e["verdict"] == "free-plan":
+            account = e.get("email") or e.get("account_id") or "this account"
+            conditions.append(
+                {
+                    "key": f"codex-free-plan:{e['home']}",
+                    "severity": "warn",
+                    "subject": f"codex: {_short(e['home'])} is on the FREE plan",
+                    "body": (
+                        f"{_short(e['home'])} is bound to {account}, which has no paid "
+                        "Codex entitlement and is excluded from dispatch.\n"
+                        "Heal: upgrade that account, then run "
+                        f"`{_login_command(e['home'])}` so the lane receives "
+                        "the updated entitlement."
+                    ),
+                }
+            )
+
     for d in snap["codex"]["duplicates"]:
         conditions.append(
             {
@@ -115,6 +140,25 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     + ", ".join(_short(h) for h in d["homes"])
                     + "\nWhichever refreshes first revokes the other. Re-login one of them "
                     "to a distinct account: CODEX_HOME=<home> codex login"
+                ),
+            }
+        )
+
+    app_home = snap["codex"].get("app_home") or {}
+    for lane_home in app_home.get("shadows") or []:
+        conditions.append(
+            {
+                "key": f"codex-app-shadow:{lane_home}",
+                "severity": "warn",
+                "once": True,
+                "subject": f"codex: app and {_short(lane_home)} share an account",
+                "body": (
+                    f"The desktop app ({_short(app_home.get('home', '~/.codex'))}) and "
+                    f"lane {_short(lane_home)} are both bound to "
+                    f"{app_home.get('email') or app_home.get('account_id') or 'one account'}. "
+                    "Concurrent token refreshes can revoke the lane, so dispatch is "
+                    f"handicapping it. If the lane dies, run `{_login_command(lane_home)}`. "
+                    "`carpool status` shows all bindings without switching logins."
                 ),
             }
         )
@@ -191,7 +235,33 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 "subject": "claude: no dispatchable lanes",
                 "body": (
                     f"All {lanes['enrolled']} enrolled Claude lane(s) are exhausted or "
-                    f"failing.{lane_reset_txt}\nDetails: carpool claude-pick --json --all"
+                    f"failing.{lane_reset_txt}\nDetails: carpool pick claude --json --all"
+                ),
+            }
+        )
+
+    mirror = snap["claude"].get("session_mirror") or {}
+    if mirror.get("status") == "stalled":
+        if mirror.get("job_loaded") is False:
+            detail = "configured scheduler job is not loaded"
+        elif mirror.get("run_min") is not None:
+            detail = f"run hung for {mirror['run_min']} min"
+        else:
+            detail = f"heartbeat idle {mirror.get('age_min', '?')} min, no run in flight"
+        try:
+            restart = config.command("mirror_restart_cmd")
+        except config.ConfigError:
+            restart = None
+        recovery = shlex.join(restart) if restart else "carpool mirror --quiet"
+        conditions.append(
+            {
+                "key": "cc-mirror-stalled",
+                "severity": "warn",
+                "subject": "carpool mirror: stalled",
+                "body": (
+                    f"Desktop session mirroring has stopped ({detail}); account switches "
+                    "may hide sessions until it runs again.\n"
+                    f"Heal: {recovery}\nHeartbeat: {mirror.get('log') or 'not reported'}"
                 ),
             }
         )
@@ -242,6 +312,8 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None) -> d
         prev = alerts_state.get(c["key"]) or {}
         last_sent = parse_iso(prev.get("last_sent"))
         due = last_sent is None or (now - last_sent).total_seconds() > REALERT_HOURS * 3600
+        if c.get("once") and prev.get("active"):
+            due = False
         if not prev.get("active") or due:
             prefix = {"critical": "🚨", "warn": "⚠️"}.get(c["severity"], "ℹ️")
             if _notify(f"{prefix} {c['subject']}", c["body"], dry_run):
@@ -262,7 +334,8 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None) -> d
             continue
         if key.startswith(
             ("codex-revoked:", "codex-refresh-revoked:", "codex-noauth:", "codex-dup:",
-             "codex-fleet-empty", "claude-lane-auth:", "claude-lanes-empty")
+             "codex-fleet-empty", "codex-free-plan:", "claude-lane-auth:",
+             "claude-lanes-empty", "cc-mirror-stalled")
         ) and not _same_home_still_bad(key):
             _notify(f"✅ recovered: {key}", "Condition no longer present.", dry_run)
             recovered.append(key)

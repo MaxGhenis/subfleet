@@ -10,6 +10,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CARPOOL_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(tmp_path / "home" / ".codex"))
     for name in (
         "CARPOOL_STATE_DIR",
         "CARPOOL_CLAUDE_ACCOUNTS",

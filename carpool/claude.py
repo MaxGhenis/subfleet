@@ -1,6 +1,7 @@
 """Claude identity, per-account OAuth quota probes, and limit-event scans."""
 
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -78,6 +79,123 @@ def accounts_report(active_email: str | None, timeout: float = 15.0,
         rows.append(row)
     rows.sort(key=lambda r: (not r["active"], not r["enrolled"], r["email"]))
     return rows
+
+
+MIRROR_STALL_MIN = 10.0
+MIRROR_HANG_MIN = 30.0
+
+
+def _mirror_job_loaded(runner=subprocess.run) -> bool | None:
+    """Probe an optional configured scheduler job; None means unavailable."""
+    label = config.mirror_job_label()
+    if not label:
+        return None
+    try:
+        result = runner(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.returncode == 0
+
+
+def _parse_etime(value: str) -> float | None:
+    """Convert ps etime (SS, MM:SS, HH:MM:SS, DD-HH:MM:SS) to minutes."""
+    value = value.strip()
+    if not value:
+        return None
+    days = 0
+    if "-" in value:
+        raw_days, _, value = value.partition("-")
+        try:
+            days = int(raw_days)
+        except ValueError:
+            return None
+    try:
+        parts = [int(part) for part in value.split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 1:
+        hours, minutes, seconds = 0, 0, parts[0]
+    elif len(parts) == 2:
+        hours, (minutes, seconds) = 0, parts
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        return None
+    return round(days * 1440 + hours * 60 + minutes + seconds / 60, 1)
+
+
+def _mirror_run_minutes(runner=subprocess.run) -> float | None:
+    """Return the age of an in-flight mirror pass, if one can be observed."""
+    try:
+        result = runner(
+            ["pgrep", "-f", "bin/carpool-mirror"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        pids = [pid for pid in result.stdout.split() if pid.isdigit()]
+        if not pids:
+            return None
+        result = runner(
+            ["ps", "-o", "etime=", "-p", pids[0]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return _parse_etime(result.stdout)
+
+
+def session_mirror_health(
+    log_path: Path | None = None,
+    job_probe=None,
+    run_probe=None,
+    now: datetime | None = None,
+) -> dict:
+    """Report mirror health from its per-pass state sidecar heartbeat.
+
+    A stale heartbeat is tolerated while a pass is in flight, until that pass
+    exceeds the 30-minute hang cutoff. Missing heartbeats mean the optional
+    mirror is absent and never cause an alert.
+    """
+    heartbeat = log_path or paths.cc_mirror_heartbeat_path()
+    now = now or now_local()
+    try:
+        mtime = heartbeat.stat().st_mtime
+    except OSError:
+        return {
+            "status": "absent",
+            "log": str(heartbeat),
+            "age_min": None,
+            "run_min": None,
+            "job_loaded": None,
+            "as_of": iso(now),
+        }
+    age_min = round((now.timestamp() - mtime) / 60, 1)
+    job_loaded = (job_probe or _mirror_job_loaded)()
+    run_min = (run_probe or _mirror_run_minutes)()
+    if job_loaded is False:
+        status = "stalled"
+    elif age_min <= MIRROR_STALL_MIN:
+        status = "healthy"
+    elif run_min is not None and run_min <= MIRROR_HANG_MIN:
+        status = "running"
+    else:
+        status = "stalled"
+    return {
+        "status": status,
+        "log": str(heartbeat),
+        "age_min": age_min,
+        "run_min": run_min,
+        "job_loaded": job_loaded,
+        "as_of": iso(now),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 {
-  "_comment": "accounts lists the roster; enrolled maps emails to secret items. Optional codex_homes overrides discovery; null uses ~/.codex plus numeric ~/.codex-N directories. secret_store_cmd is an argv prefix implementing get/set/del (set reads stdin); null uses macOS security. notify_cmd receives subject/body argv and the combined message on stdin; null prints alerts to stderr.",
+  "_comment": "accounts lists the roster; enrolled maps emails to secret items. codex_homes null discovers numeric ~/.codex-N lanes; ~/.codex is observed separately as the desktop app home and is never dispatched. Commands are argv prefixes, never shell expressions.",
   "enrolled": {
     "user1@example.com": "claude-quota-user1@example.com"
   },
@@ -8,7 +8,12 @@
     "user2@example.com"
   ],
   "codex_homes": null,
+  "codex_app_home": "~/.codex",
+  "protected_account": null,
   "secret_name_prefix": "claude-quota-",
   "secret_store_cmd": null,
-  "notify_cmd": null
+  "notify_cmd": null,
+  "mirror_heartbeat": "~/.claude/cc-mirror-state.json",
+  "mirror_job_label": null,
+  "mirror_restart_cmd": null
 }

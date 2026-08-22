@@ -17,6 +17,7 @@ revocation trap this monitor watches for).
 
 import glob
 import json
+import os
 import re
 import subprocess
 import urllib.error
@@ -25,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 
+from . import config
 from .util import from_epoch, iso, jwt_claims, now_local, parse_iso, parse_reset_clock
 
 WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -35,6 +37,7 @@ USAGE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 REVOKED_RE = re.compile(r"refresh token was revoked", re.IGNORECASE)
+TOKEN_EXPIRED_RE = re.compile(r"token (?:is |has )?expired|token_expired", re.IGNORECASE)
 
 
 def read_auth(home: Path) -> dict:
@@ -64,6 +67,70 @@ def read_auth(home: Path) -> dict:
     }
 
 
+def app_home_identity() -> dict:
+    """Read the desktop app's current identity without exposing token fields."""
+    from . import paths
+
+    return {
+        key: value
+        for key, value in read_auth(paths.app_codex_home()).items()
+        if not str(key).startswith("_")
+    }
+
+
+def protected_account() -> dict | None:
+    """Return the account whose interactive quota should be spared.
+
+    The observed app-home identity is authoritative. ``protected_account`` in
+    ``accounts.json`` is used only when the app home has no readable identity.
+    The configured value may be an email/account-id string, an object with
+    ``email``/``account_id``, or a list of either.
+    """
+    app = app_home_identity()
+    if app.get("status") == "ok" and (app.get("email") or app.get("account_id")):
+        return {
+            "emails": {str(app["email"]).strip().lower()} if app.get("email") else set(),
+            "account_ids": (
+                {str(app["account_id"]).strip().lower()} if app.get("account_id") else set()
+            ),
+            "source": "app-home",
+        }
+
+    raw = config.load().get("protected_account")
+    entries = raw if isinstance(raw, list) else [raw]
+    emails: set[str] = set()
+    account_ids: set[str] = set()
+    for item in entries:
+        if isinstance(item, str) and item.strip():
+            destination = emails if "@" in item else account_ids
+            destination.add(item.strip().lower())
+        elif isinstance(item, dict):
+            email = item.get("email")
+            account_id = item.get("account_id")
+            if isinstance(email, str) and email.strip():
+                emails.add(email.strip().lower())
+            if isinstance(account_id, str) and account_id.strip():
+                account_ids.add(account_id.strip().lower())
+    if not emails and not account_ids:
+        return None
+    return {"emails": emails, "account_ids": account_ids, "source": "config"}
+
+
+def is_protected_account(
+    email: str | None, account_id: str | None, protected: dict | None
+) -> bool:
+    if not protected:
+        return False
+    if account_id and str(account_id).strip().lower() in protected["account_ids"]:
+        return True
+    return bool(email) and str(email).strip().lower() in protected["emails"]
+
+
+def plan_is_free(plan_type) -> bool:
+    """Only the literal free plan is excluded; paid plan names remain open."""
+    return isinstance(plan_type, str) and plan_type.strip().lower() == "free"
+
+
 def _window(w: dict | None) -> dict | None:
     if not isinstance(w, dict):
         return None
@@ -72,6 +139,23 @@ def _window(w: dict | None) -> dict | None:
         "window_seconds": w.get("limit_window_seconds"),
         "reset_at": iso(from_epoch(w.get("reset_at"))),
     }
+
+
+FIVE_HOUR_MAX_SECONDS = 6 * 3600
+
+
+def classify_windows(*windows: dict | None) -> tuple[dict | None, dict | None]:
+    """Classify quota windows by duration rather than unstable API position."""
+    five_hour = weekly = None
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        seconds = window.get("window_seconds") or 0
+        if 0 < seconds <= FIVE_HOUR_MAX_SECONDS:
+            five_hour = five_hour or window
+        elif seconds > FIVE_HOUR_MAX_SECONDS:
+            weekly = weekly or window
+    return five_hour, weekly
 
 
 def probe_wham(auth: dict, timeout: float = 15.0, opener=None) -> dict:
@@ -132,6 +216,9 @@ def probe_wham(auth: dict, timeout: float = 15.0, opener=None) -> dict:
                 "primary": _window(extra_rl.get("primary_window")),
             }
         )
+    primary = _window(rl.get("primary_window"))
+    secondary = _window(rl.get("secondary_window"))
+    five_hour, weekly = classify_windows(primary, secondary)
     return {
         "status": "ok",
         "checked_at": checked_at,
@@ -139,8 +226,10 @@ def probe_wham(auth: dict, timeout: float = 15.0, opener=None) -> dict:
         "plan_type": payload.get("plan_type"),
         "allowed": rl.get("allowed"),
         "limit_reached": rl.get("limit_reached"),
-        "primary": _window(rl.get("primary_window")),
-        "secondary": _window(rl.get("secondary_window")),
+        "primary": primary,
+        "secondary": secondary,
+        "five_hour": five_hour,
+        "weekly": weekly,
         "additional": extras,
     }
 
@@ -148,6 +237,79 @@ def probe_wham(auth: dict, timeout: float = 15.0, opener=None) -> dict:
 def probe_all(auths: list[dict], timeout: float = 15.0, opener=None) -> list[dict]:
     with ThreadPoolExecutor(max_workers=max(len(auths), 1)) as ex:
         return list(ex.map(lambda a: probe_wham(a, timeout=timeout, opener=opener), auths))
+
+
+def probe_looks_token_expired(probe: dict) -> bool:
+    return (
+        probe.get("status") == "http-401"
+        and bool(TOKEN_EXPIRED_RE.search(probe.get("error") or ""))
+    )
+
+
+REFRESH_PROBE_MODEL = "gpt-5.6-terra"
+REFRESH_PROBE_PROMPT = "Reply with exactly: ok"
+
+
+def _codex_binary() -> str:
+    """Resolve the real CLI even when a scheduler provides a minimal PATH."""
+    import shutil
+
+    override = os.environ.get("CARPOOL_CODEX_BIN")
+    if override:
+        return override
+    found = shutil.which("codex")
+    if found:
+        return found
+    home = Path.home()
+    for candidate in (
+        home / ".bun" / "bin" / "codex",
+        home / ".bun" / "install" / "global" / "node_modules" / ".bin" / "codex",
+        home / "bin" / "codex",
+        Path("/opt/homebrew/bin/codex"),
+        Path("/usr/local/bin/codex"),
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "codex"
+
+
+def refresh_via_cli(
+    home: Path | str,
+    model: str = REFRESH_PROBE_MODEL,
+    timeout: float = 300.0,
+    runner=subprocess.run,
+) -> dict:
+    """Let the vendor CLI refresh and persist its own token atomically."""
+    command = [
+        _codex_binary(),
+        "exec",
+        "-m",
+        model,
+        "--skip-git-repo-check",
+        REFRESH_PROBE_PROMPT,
+    ]
+    try:
+        result = runner(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "CODEX_HOME": str(home)},
+            cwd=str(home),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "status": "failed",
+            "rc": None,
+            "detail": f"{type(exc).__name__}: {exc}"[:300],
+        }
+    output = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if REVOKED_RE.search(output):
+        return {"status": "revoked", "rc": result.returncode, "detail": "refresh token was revoked"}
+    if result.returncode == 0:
+        return {"status": "ok", "rc": 0, "detail": ""}
+    tail = output.strip().splitlines()[-1].strip() if output.strip() else ""
+    return {"status": "failed", "rc": result.returncode, "detail": tail[:300]}
 
 
 def _recent_rollouts(home: Path, max_age_hours: float) -> list[Path]:
