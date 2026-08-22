@@ -2,7 +2,7 @@
 
 ## State
 
-The public rename, topology/health behavior, durable ledger, and hardened auto-picking runners are complete. The next slice wires the staged re-login ritual and remaining pass-through/status commands into the unified CLI.
+The public rename, unified CLI, topology/health behavior, durable ledger, login ritual, and hardened auto-picking runners are complete. The next slice commits the safe expired-token watchdog repair, followed by documentation and the final privacy audit.
 
 ## Done
 
@@ -27,8 +27,13 @@ The public rename, topology/health behavior, durable ledger, and hardened auto-p
 - Ported the Claude auto-pick/re-pick runner through the public secret store, including lane usage/run ledgers, rc 4/5 classification, API-key scrubbing, safe detach/salvage handling, and served-model downgrade markers.
 - Added a generic Codex guard and live trust preflight for four portable high-risk command patterns; organization-specific policies were deliberately excluded.
 - Preserved caller working directories in the repository launcher and kept the combined suite green (`317 passed`).
+- Added `carpool login codex <N|app>` with configurable browser launching, private state permissions, a detached completion watcher, distinct numbered-lane validation, app-shadow reporting, public notifications, and a configurable status refresh.
+- Completed unified `mirror`, `brief`, and app-inclusive `errors` routing and added compact Markdown capacity rendering.
+- Unified Claude picking and status snapshots on the durable capacity ledger; inference-only setup tokens are no longer sent to the usage endpoint, expected enrollment responses are accepted, and successful re-enrollment clears stale cooldowns.
+- Added free-plan and app-shadow handling to the normalized cross-provider capacity surface, classified Codex windows by duration, and filtered the app home and duplicate paths from explicit lane configuration.
+- Kept the expanded suite green (`339 passed in 24.08s`).
 
 ## Next
 
-- Wire `carpool login codex <N|app>` and its completion watcher through the unified CLI.
-- Add `mirror` and `brief` routing, then commit the expired-token watchdog repair.
+- Commit the one-shot, rate-limited Codex expired-access-token repair and its revocation latch.
+- Rewrite the README, scrub identifiers and legacy names, run the exact final suite, and prepare the local review report without pushing.

@@ -287,6 +287,128 @@ def test_account_rows_calibration_active_merge_and_family_scoring():
     assert scores["claude"]["score"] == 70
 
 
+def test_free_plan_codex_row_is_not_dispatchable():
+    row = capacity._codex_account_row(
+        {
+            "home": "/h/codex-1",
+            "auth": {
+                "status": "ok",
+                "account_id": "account-1",
+                "email": "free@example.com",
+            },
+            "probe": {
+                "status": "ok",
+                "plan_type": "free",
+                "allowed": True,
+                "limit_reached": False,
+                "primary": {"used_percent": 1},
+                "secondary": {"used_percent": 1},
+            },
+        },
+        NOW,
+    )
+
+    assert row["status"] == "free-plan"
+    assert row["dispatchable"] is False
+    assert capacity.family_score([row], "codex", now=NOW)["best_resource"] is None
+
+
+def test_codex_capacity_classifies_reversed_windows_by_duration():
+    row = capacity._codex_account_row(
+        {
+            "home": "/h/codex-1",
+            "auth": {"status": "ok", "account_id": "account-1"},
+            "probe": {
+                "status": "ok",
+                "allowed": True,
+                "limit_reached": False,
+                "primary": {
+                    "used_percent": 70,
+                    "window_seconds": 604_800,
+                },
+                "secondary": {
+                    "used_percent": 20,
+                    "window_seconds": 18_000,
+                },
+            },
+        },
+        NOW,
+    )
+
+    assert row["five_hour"]["used_percent"] == 20
+    assert row["weekly"]["used_percent"] == 70
+
+
+def test_capacity_dispatch_handicaps_app_shadowed_codex_account(
+    tmp_path, monkeypatch
+):
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "auth.json").write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "account_id": "protected-account",
+                    "id_token": "",
+                    "access_token": "",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+    live = {
+        "codex": [
+            {
+                "home": "/h/codex-1",
+                "auth": {"status": "ok", "account_id": "protected-account"},
+                "probe": {
+                    "status": "ok",
+                    "primary": {"used_percent": 10},
+                    "secondary": {"used_percent": 10},
+                },
+            },
+            {
+                "home": "/h/codex-2",
+                "auth": {"status": "ok", "account_id": "alternate-account"},
+                "probe": {
+                    "status": "ok",
+                    "primary": {"used_percent": 15},
+                    "secondary": {"used_percent": 15},
+                },
+            },
+        ],
+        "claude": {"identity": {}, "probe": {"status": "skipped"}},
+    }
+
+    rows = capacity.account_rows(
+        live,
+        now=NOW,
+        entries=[],
+        enrolled={},
+        known_accounts=[],
+        cooldowns={},
+    )
+
+    by_home = {row["home"]: row for row in rows}
+    assert by_home["/h/codex-1"]["shadowed_by_app"] is True
+    assert capacity.family_score(rows, "codex", now=NOW)["best_resource"] == "/h/codex-2"
+
+
+def test_cooldown_updates_are_locked_case_insensitive_and_never_shorten(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    long_limit = NOW + timedelta(days=30)
+
+    assert capacity.store_lane_cooldown("Lane@Example.com", long_limit, path=path)
+    assert capacity.store_lane_cooldown(
+        "lane@example.com", NOW + timedelta(hours=1), path=path
+    )
+
+    stored = json.loads(path.read_text())
+    assert stored == {"Lane@Example.com": at(timedelta(days=30))}
+    assert capacity.clear_lane_cooldown("LANE@example.com", path=path)
+    assert json.loads(path.read_text()) == {}
+
+
 def test_claude_email_matching_is_case_insensitive_and_preserves_config_spelling():
     configured = "Lane@Example.com"
     entries = [

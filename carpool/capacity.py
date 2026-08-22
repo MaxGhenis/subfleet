@@ -9,18 +9,20 @@ tests never need live network or keychain access.
 
 from __future__ import annotations
 
+import fcntl
 import json
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import claude, codex, config, paths
+from . import claude, codex, config, paths, run_ledger
 from .util import atomic_write_json, iso, load_json, now_local, parse_iso, strip_private
 
 LIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_PROBE_TIMEOUT = 5.0
 MIN_DISPATCH_HEADROOM = 5.0
+PROTECTED_ACCOUNT_HANDICAP = 10.0
 FIVE_HOURS = timedelta(hours=5)
 SEVEN_DAYS = timedelta(days=7)
 
@@ -94,6 +96,68 @@ def _append_ledger(record: dict, path: Path | str | None = None) -> None:
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a") as stream:
         stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def store_lane_cooldown(
+    email: str,
+    until: datetime,
+    *,
+    path: Path | str | None = None,
+) -> bool:
+    """Atomically extend a lane cooldown without shortening an existing one."""
+    destination = Path(path) if path is not None else paths.cooldowns_path()
+    lock_path = destination.with_suffix(destination.suffix + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            data = load_json(destination, {}) or {}
+            if not isinstance(data, dict):
+                data = {}
+            key = next(
+                (
+                    candidate
+                    for candidate in data
+                    if isinstance(candidate, str)
+                    and candidate.casefold() == email.casefold()
+                ),
+                email,
+            )
+            existing = parse_iso(data.get(key))
+            candidate = _aware(until)
+            data[key] = iso(max(_aware(existing), candidate) if existing else candidate)
+            atomic_write_json(destination, data)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
+
+
+def clear_lane_cooldown(
+    email: str,
+    *,
+    path: Path | str | None = None,
+) -> bool:
+    """Atomically clear every case variant after successful re-enrollment."""
+    destination = Path(path) if path is not None else paths.cooldowns_path()
+    lock_path = destination.with_suffix(destination.suffix + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            data = load_json(destination, {}) or {}
+            if not isinstance(data, dict):
+                data = {}
+            data = {
+                key: value
+                for key, value in data.items()
+                if not isinstance(key, str) or key.casefold() != email.casefold()
+            }
+            atomic_write_json(destination, data)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
 
 
 def parse_transcript_usage(
@@ -483,9 +547,17 @@ def _codex_account_row(item: dict, now: datetime) -> dict:
     home = str(item.get("home") or auth.get("home") or "")
     email = probe.get("email") or auth.get("email")
     account_id = auth.get("account_id") or email or home
-    five_hour = _percent_reading(probe.get("primary"))
-    weekly = _percent_reading(probe.get("secondary"))
+    five_raw, weekly_raw = codex.classify_windows(
+        probe.get("primary"), probe.get("secondary")
+    )
+    if five_raw is None and weekly_raw is None:
+        five_raw, weekly_raw = probe.get("primary"), probe.get("secondary")
+    five_hour = _percent_reading(five_raw)
+    weekly = _percent_reading(weekly_raw)
     status = probe.get("status") or auth.get("status") or "unknown"
+    plan = probe.get("plan_type") or auth.get("plan")
+    if status == "ok" and codex.plan_is_free(plan):
+        status = "free-plan"
     limited = bool(probe.get("limit_reached") or probe.get("allowed") is False)
     reset_candidates: list[datetime] = []
     for reading in (five_hour, weekly):
@@ -518,6 +590,7 @@ def _codex_account_row(item: dict, now: datetime) -> dict:
         "confidence": "live",
         "dispatchable": dispatchable,
         "status": status,
+        "plan": plan,
         "auth_status": auth.get("status"),
     }
 
@@ -570,10 +643,17 @@ def account_rows(
     known_values = [known_accounts] if isinstance(known_accounts, str) else list(known_accounts)
 
     by_codex_id: dict[str, dict] = {}
+    protected = codex.protected_account()
     for item in live.get("codex") or []:
         if not isinstance(item, dict):
             continue
         row = _codex_account_row(item, current)
+        row["protected"] = codex.is_protected_account(
+            row.get("email"), row.get("id"), protected
+        )
+        row["shadowed_by_app"] = bool(
+            row["protected"] and protected and protected.get("source") == "app-home"
+        )
         prior = by_codex_id.get(row["id"])
         by_codex_id[row["id"]] = _prefer_codex_row(prior, row) if prior else row
 
@@ -699,11 +779,139 @@ def _row_score(row: dict) -> float:
         if remaining is not None
     ]
     if known:
-        return min(known)
+        score = min(known)
+        if row.get("family") == "codex" and row.get("protected"):
+            score = max(0.0, score - PROTECTED_ACCOUNT_HANDICAP)
+        return score
     # Inference-only Claude tokens have no denominator until the first observed
     # hard limit.  Optimistic rotation is safer than treating every fresh lane
     # as exhausted.  Unknown Codex readings, by contrast, cannot be dispatched.
     return 100.0 if row.get("family") == "claude" else 0.0
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def rank_claude_lanes(
+    rows: Iterable[dict],
+    *,
+    handicap: float = 10.0,
+    min_headroom: float = MIN_DISPATCH_HEADROOM,
+) -> tuple[list[dict], list[dict]]:
+    """Rank ledger-backed Claude lanes without probing setup tokens."""
+    counts = run_ledger.in_flight_counts()
+    ranked: list[dict] = []
+    excluded: list[dict] = []
+    for row in rows:
+        if row.get("family") != "claude" or not row.get("enrolled"):
+            continue
+        five_hour = row.get("five_hour") or {}
+        weekly = row.get("weekly") or {}
+        five_used = _finite_number(five_hour.get("used_percent"))
+        weekly_used = _finite_number(weekly.get("used_percent"))
+        known = [value for value in (five_used, weekly_used) if value is not None]
+        effective = max(known) if known else None
+        headroom = 100.0 - effective if effective is not None else None
+        below_floor = headroom is not None and headroom < min_headroom
+        email = row.get("email") or row.get("id")
+        if not row.get("dispatchable") or below_floor:
+            verdict = "exhausted" if below_floor else str(row.get("status") or "unavailable")
+            if row.get("pending_hard_limit") or row.get("limited_until"):
+                verdict = "limited"
+            excluded.append(
+                {"email": email, "verdict": verdict, "reset_at": row.get("limited_until")}
+            )
+            continue
+        in_flight = int(
+            row.get("in_flight")
+            or counts.get(("claude", str(email).casefold()), 0)
+        )
+        score = effective + (handicap if row.get("active") else 0.0) \
+            if effective is not None else None
+        ranked.append(
+            {
+                "email": email,
+                "active": bool(row.get("active")),
+                "five_hour_used_percent": five_used,
+                "weekly_used_percent": weekly_used,
+                "five_hour_tokens": five_hour.get("tokens"),
+                "weekly_tokens": weekly.get("tokens"),
+                "effective_used_percent": effective,
+                "headroom_score": headroom,
+                "five_hour_reset_at": five_hour.get("reset_at"),
+                "weekly_reset_at": weekly.get("reset_at"),
+                "learned_capacity": row.get("learned_capacity"),
+                "confidence": row.get("confidence"),
+                "score": round(score, 2) if score is not None else None,
+                "in_flight": in_flight,
+            }
+        )
+
+    def tokens(value):
+        number = _finite_number(value)
+        return float("inf") if number is None else number
+
+    ranked.sort(
+        key=lambda row: (
+            row["score"] is None,
+            row["score"] if row["score"] is not None else 0.0,
+            row["in_flight"],
+            bool(row["active"]) if row["score"] is None else False,
+            tokens(row["weekly_tokens"]),
+            tokens(row["five_hour_tokens"]),
+            str(row["email"]),
+        )
+    )
+    return ranked, excluded
+
+
+def claude_lane_fleet(rows: Iterable[dict]) -> dict:
+    """Snapshot-friendly fleet summary from normalized capacity rows."""
+    materialized = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("family") == "claude"
+    ]
+    enrolled_rows = [row for row in materialized if row.get("enrolled")]
+    ranked, excluded = rank_claude_lanes(materialized)
+    excluded_by_email = {str(row["email"]): row for row in excluded}
+    ranked_by_email = {str(row["email"]): row for row in ranked}
+    lanes = []
+    for row in enrolled_rows:
+        email = str(row.get("email") or row.get("id"))
+        if email in ranked_by_email:
+            lanes.append({**ranked_by_email[email], "verdict": "ok", "reset_at": None})
+        else:
+            five = row.get("five_hour") or {}
+            weekly = row.get("weekly") or {}
+            exclusion = excluded_by_email.get(email) or {
+                "verdict": str(row.get("status") or "unavailable"),
+                "reset_at": row.get("limited_until"),
+            }
+            lanes.append(
+                {
+                    "email": email,
+                    "active": bool(row.get("active")),
+                    "five_hour_used_percent": _finite_number(five.get("used_percent")),
+                    "weekly_used_percent": _finite_number(weekly.get("used_percent")),
+                    "five_hour_reset_at": five.get("reset_at"),
+                    "weekly_reset_at": weekly.get("reset_at"),
+                    "verdict": exclusion["verdict"],
+                    "reset_at": exclusion.get("reset_at"),
+                    "in_flight": int(row.get("in_flight") or 0),
+                }
+            )
+    resets = [lane["reset_at"] for lane in lanes if lane.get("reset_at")]
+    return {
+        "enrolled": len(enrolled_rows),
+        "dispatchable_now": len(ranked),
+        "best": ranked[0]["email"] if ranked else None,
+        "earliest_reset": min(resets) if resets else None,
+        "lanes": lanes,
+    }
 
 
 def family_score(

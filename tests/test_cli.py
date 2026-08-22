@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from carpool import claude, cli, config, secret_store
+from carpool import claude, cli, config, paths, secret_store
 
 
 def test_help_exposes_generic_watch_without_removed_couplings(capsys):
@@ -14,7 +14,7 @@ def test_help_exposes_generic_watch_without_removed_couplings(capsys):
     assert exc.value.code == 0
     help_text = capsys.readouterr().out.lower()
     assert "watch" in help_text
-    assert "brief" not in help_text
+    assert "brief" in help_text
     assert "statusline" not in help_text
     assert "launchd" not in help_text
 
@@ -113,6 +113,36 @@ def test_enroll_store_failure_does_not_mark_account_enrolled(monkeypatch, capsys
     captured = capsys.readouterr()
     assert "secret store failed" in captured.err.lower()
     assert "test-token" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("probe_status", ["http-403", "rate-limited"])
+def test_enroll_accepts_inference_only_token_status_and_clears_cooldown(
+    monkeypatch, capsys, probe_status
+):
+    email = "lane@example.com"
+    config.save({"accounts": [email], "enrolled": {}, "codex_homes": []})
+    paths.cooldowns_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.cooldowns_path().write_text(json.dumps({email.upper(): "2099-01-01T00:00:00Z"}))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("inference-token\n"))
+    monkeypatch.setattr(
+        claude,
+        "probe_oauth_usage",
+        lambda token: {"status": probe_status},
+    )
+    stored = []
+    monkeypatch.setattr(
+        secret_store,
+        "set",
+        lambda name, value: stored.append((name, value)) or True,
+    )
+
+    assert cli.main(["enroll", email]) == 0
+
+    assert stored == [(f"claude-quota-{email}", "inference-token")]
+    assert json.loads(paths.cooldowns_path().read_text()) == {}
+    output = capsys.readouterr().out
+    assert "expected for an inference-only setup token" in output
+    assert "inference-token" not in output
 
 
 def test_enroll_rejects_bad_token_before_secret_store(monkeypatch, capsys):

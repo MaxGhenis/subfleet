@@ -8,9 +8,12 @@
   carpool run ...                # capacity-aware delegate router
   carpool codex ...              # hardened Codex runner
   carpool claude ...             # hardened Claude runner
+  carpool login codex <N|app>    # stage an interactive Codex re-login
   carpool enroll <email>
+  carpool mirror [--quiet]       # desktop session mirror pass
   carpool errors --hours 48
   carpool watch [--dry-run]
+  carpool brief                  # compact Markdown status section
 """
 
 import argparse
@@ -32,7 +35,15 @@ from . import (
     snapshot,
     watchdog,
 )
-from .util import from_epoch, iso, load_json, now_local, parse_iso, parse_reset_clock, strip_private
+from .util import (
+    from_epoch,
+    iso,
+    load_json,
+    now_local,
+    parse_iso,
+    parse_reset_clock,
+    strip_private,
+)
 
 
 def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
@@ -214,30 +225,23 @@ def cmd_pick(args) -> int:
     return 0
 
 
-def _claude_lane_rows(cached: bool, timeout: float = 15.0) -> tuple[str | None, list[dict]]:
-    """(generated_at, account rows) for lane ranking. The live path probes only
-    the Claude side — dispatch shouldn't pay for codex probes."""
-    if cached:
-        snap = load_json(paths.snapshot_path())
-        if snap:
-            return snap.get("generated_at"), (snap.get("claude") or {}).get("accounts") or []
-        print("carpool: no cached snapshot yet; probing live", file=sys.stderr)
-    from .util import iso, now_local
-
-    return iso(now_local()), claude.accounts_report(claude.identity().get("email"), timeout=timeout)
+def _capacity_lane_ranking(
+    report: dict, *, handicap: float, min_headroom: float
+) -> tuple[list[dict], list[dict]]:
+    return capacity.rank_claude_lanes(
+        report.get("accounts") or [],
+        handicap=handicap,
+        min_headroom=min_headroom,
+    )
 
 
 def cmd_claude_pick(args) -> int:
-    generated_at, rows = _claude_lane_rows(args.cached)
+    report = capacity.build()
     handicap = 0.0 if args.no_handicap else args.handicap
-    ranked = claude.rank_lanes(rows, handicap=handicap, min_headroom=args.min_headroom)
-    fleet = claude.lanes_fleet(rows, handicap=handicap, min_headroom=args.min_headroom)
+    ranked, excluded = _capacity_lane_ranking(
+        report, handicap=handicap, min_headroom=args.min_headroom
+    )
     requested_exclusions = {str(email) for email in args.exclude if email}
-    excluded = [
-        {"email": lane["email"], "verdict": lane["verdict"], "reset_at": lane.get("reset_at")}
-        for lane in fleet["lanes"]
-        if lane["verdict"] != "ok"
-    ]
     if requested_exclusions:
         excluded.extend(
             {"email": row["email"], "verdict": "excluded", "reset_at": None}
@@ -245,19 +249,26 @@ def cmd_claude_pick(args) -> int:
             if str(row["email"]) in requested_exclusions
         )
         ranked = [row for row in ranked if str(row["email"]) not in requested_exclusions]
+    enrolled = sum(
+        bool(row.get("enrolled"))
+        for row in report.get("accounts") or []
+        if row.get("family") == "claude"
+    )
+    resets = [row["reset_at"] for row in excluded if row.get("reset_at")]
+    earliest_reset = min(resets) if resets else None
     if args.json:
         out = {
-            "generated_at": generated_at,
+            "generated_at": report.get("generated_at"),
             "best": ranked[0]["email"] if ranked else None,
             "ranked": ranked if args.all else ranked[:1],
             "excluded": excluded,
-            "enrolled": fleet["enrolled"],
-            "earliest_reset": fleet["earliest_reset"],
+            "enrolled": enrolled,
+            "earliest_reset": earliest_reset,
         }
         print(json.dumps(out, indent=1))
         return 0 if ranked else 1
     if not ranked:
-        if fleet["enrolled"] == 0:
+        if enrolled == 0:
             print(
                 "carpool pick claude: no lanes enrolled — enroll with: "
                 "claude setup-token, then carpool enroll <email>",
@@ -267,7 +278,7 @@ def cmd_claude_pick(args) -> int:
             blocked = "; ".join(f"{lane['email']} {lane['verdict']}" for lane in excluded)
             print(
                 "carpool pick claude: no dispatchable claude lane"
-                + (f" (earliest reset {fleet['earliest_reset']})" if fleet.get("earliest_reset") else "")
+                + (f" (earliest reset {earliest_reset})" if earliest_reset else "")
                 + (f" — {blocked}" if blocked else ""),
                 file=sys.stderr,
             )
@@ -276,9 +287,19 @@ def cmd_claude_pick(args) -> int:
     def _detail(r):
         fh = r.get("five_hour_used_percent")
         wk = r.get("weekly_used_percent")
-        return (
-            f"5h {fh:.0f}%" if fh is not None else "5h ?"
-        ) + " used · " + (f"week {wk:.0f}%" if wk is not None else "week ?") + (
+        fh_tokens = r.get("five_hour_tokens")
+        wk_tokens = r.get("weekly_tokens")
+
+        def reading(label, percent, tokens):
+            if percent is not None:
+                return f"{label} {percent:.0f}%"
+            if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
+                return f"{label} {int(tokens)} tok"
+            return f"{label} ?"
+
+        return reading("5h", fh, fh_tokens) + " used · " + reading(
+            "week", wk, wk_tokens
+        ) + (f" [{r.get('confidence')}]" if r.get("confidence") else "") + (
             " [active login]" if r.get("active") else ""
         )
 
@@ -292,10 +313,14 @@ def cmd_claude_pick(args) -> int:
 
 
 def cmd_errors(args) -> int:
+    homes = [*paths.codex_homes()]
+    app_home = paths.app_codex_home()
+    if app_home.is_dir() and app_home not in homes:
+        homes.append(app_home)
     out = {
         "codex": {
             str(h): codex.recent_limit_errors(h, hours=args.hours)
-            for h in paths.codex_homes()
+            for h in homes
         },
         "claude": claude.transcript_limit_events(hours=args.hours),
     }
@@ -319,6 +344,21 @@ def cmd_watch(args) -> int:
     summary = watchdog.run(dry_run=args.dry_run)
     print(json.dumps(summary))
     return 0
+
+
+def cmd_brief(_args) -> int:
+    print(render.brief_md(_load_snapshot(cached=True)))
+    return 0
+
+
+def cmd_login(args) -> int:
+    from . import login
+
+    return login.codex_login(
+        args.target,
+        watch=not args.no_watch,
+        open_browser=not args.no_open,
+    )
 
 
 def cmd_enroll(args) -> int:
@@ -350,7 +390,8 @@ def cmd_enroll(args) -> int:
         print("carpool enroll: empty token", file=sys.stderr)
         return 2
     probe = claude.probe_oauth_usage(token)
-    if probe.get("status") != "ok":
+    probe_status = probe.get("status")
+    if probe_status not in {"ok", "http-403", "rate-limited"}:
         print(f"carpool enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
               "not storing. Is it fresh, and for the right account?", file=sys.stderr)
         return 1
@@ -360,9 +401,17 @@ def cmd_enroll(args) -> int:
         return 1
     cfg.setdefault("enrolled", {})[email] = secret
     config.save(cfg)
+    if not capacity.clear_lane_cooldown(email):
+        print(
+            f"carpool enroll: warning: could not clear prior cooldown for {email}",
+            file=sys.stderr,
+        )
     extracted = {k: probe.get(k) for k in ("five_hour", "seven_day") if probe.get(k)}
-    print(f"enrolled {email} -> secret store item {secret}; probe ok"
-          + (f" {json.dumps(extracted)}" if extracted else " (no window fields recognized)"))
+    if probe_status == "ok":
+        detail = f"usage probe ok {json.dumps(extracted)}" if extracted else "usage probe ok"
+    else:
+        detail = f"usage probe {probe_status} (expected for an inference-only setup token)"
+    print(f"enrolled {email} -> secret store item {secret}; {detail}")
     return 0
 
 
@@ -530,9 +579,18 @@ def main(argv=None) -> int:
         ("run", "capacity-aware delegate router"),
         ("codex", "hardened Codex runner"),
         ("claude", "hardened Claude runner"),
+        ("mirror", "desktop session mirror pass"),
     ):
         p_tool = sub.add_parser(name, help=help_, add_help=False)
         p_tool.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_login = sub.add_parser(
+        "login", help="stage a Codex lane re-login: `login codex 3` or `login codex app`"
+    )
+    p_login.add_argument("family", choices=("codex",))
+    p_login.add_argument("target", help="lane number 1-9, or `app` for the desktop app home")
+    p_login.add_argument("--no-watch", action="store_true", help="do not arm the completion watcher")
+    p_login.add_argument("--no-open", action="store_true", help="print the OAuth URL instead of opening a browser")
 
     p_errors = sub.add_parser("errors", help="observed limit/auth errors")
     p_errors.add_argument("--hours", type=float, default=24)
@@ -540,6 +598,8 @@ def main(argv=None) -> int:
 
     p_watch = sub.add_parser("watch", help="one snapshot + alert cycle (for cron or another scheduler)")
     p_watch.add_argument("--dry-run", action="store_true", help="print alerts instead of sending")
+
+    sub.add_parser("brief", help="compact Markdown section for a daily status brief")
 
     p_enroll = sub.add_parser("enroll", help="store a Claude account token for quota probing")
     p_enroll.add_argument("email", help="account email (must be in accounts.json roster)")
@@ -582,19 +642,25 @@ def main(argv=None) -> int:
 
     argv = list(sys.argv[1:] if argv is None else argv)
     known = {
-        "status", "capacity", "runs", "pick", "run", "codex", "claude", "errors",
-        "watch", "enroll", "secret", "lane-usage", "_codex-binary", "_record-run",
+        "status", "capacity", "runs", "pick", "run", "codex", "claude", "mirror",
+        "login", "errors", "watch", "brief", "enroll", "secret", "lane-usage",
+        "_codex-binary", "_record-run",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
-    if argv[0] in ("run", "codex", "claude"):
+    if argv[0] in ("run", "codex", "claude", "mirror"):
         rest = argv[1:]
         if argv[0] == "run":
             from . import delegate
 
             return delegate.main(rest)
         return _exec_tool(
-            {"codex": "carpool-codex", "claude": "carpool-claude"}[argv[0]], rest
+            {
+                "codex": "carpool-codex",
+                "claude": "carpool-claude",
+                "mirror": "carpool-mirror",
+            }[argv[0]],
+            rest,
         )
     args = parser.parse_args(argv)
     if args.command == "pick":
@@ -611,8 +677,10 @@ def main(argv=None) -> int:
         "status": cmd_status,
         "capacity": cmd_capacity,
         "runs": cmd_runs,
+        "login": cmd_login,
         "errors": cmd_errors,
         "watch": cmd_watch,
+        "brief": cmd_brief,
         "enroll": cmd_enroll,
         "secret": cmd_secret,
         "lane-usage": cmd_lane_usage,

@@ -24,7 +24,16 @@ def codex_homes() -> list[Path]:
     """
     configured = config.codex_homes_setting()
     if configured is not None:
-        return configured
+        app = app_codex_home().resolve(strict=False)
+        lanes: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in configured:
+            resolved = candidate.resolve(strict=False)
+            if resolved == app or resolved in seen:
+                continue
+            seen.add(resolved)
+            lanes.append(candidate)
+        return lanes
     numbered = []
     for candidate in HOME.glob(".codex-*"):
         suffix = candidate.name.removeprefix(".codex-")

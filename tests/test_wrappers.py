@@ -251,11 +251,13 @@ def test_claude_lane_detach_keeps_prompt_until_child_finishes(tmp_path):
         fake_bin / "nohup",
         """#!/usr/bin/env bash
 set -u
+tmp_log="${DETACH_INVOCATION_LOG}.tmp"
 {
   printf 'marker=%s\n' "${CLAUDE_LANE_DETACHED-}"
   printf 'prompt=%s\n' "${CLAUDE_LANE_DETACHED_PROMPT-}"
   printf 'arg=%s\n' "$@"
-} >"$DETACH_INVOCATION_LOG"
+} >"$tmp_log"
+mv "$tmp_log" "$DETACH_INVOCATION_LOG"
 while [ ! -e "$DETACH_RELEASE" ]; do
   /bin/sleep 0.01
 done

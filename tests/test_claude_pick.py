@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from carpool import claude, cli, watchdog
+from carpool import claude, cli, config, snapshot, watchdog
 from carpool.claude import lane_verdict, lanes_fleet, rank_lanes
 from carpool.util import iso, now_local
 
@@ -150,9 +150,55 @@ class TestLanesFleet:
 
 class TestClaudePickCli:
     def _patch_rows(self, monkeypatch, rows, active="anchor@example.com"):
-        monkeypatch.setattr(claude, "identity", lambda: {"email": active})
-        monkeypatch.setattr(claude, "accounts_report",
-                            lambda active_email, timeout=15.0: rows)
+        capacity_rows = []
+        for lane in rows:
+            probe = lane.get("probe") or {}
+            five = probe.get("five_hour")
+            weekly = probe.get("seven_day")
+            status = probe.get("status") or "not-enrolled"
+            used = [
+                value
+                for value in (
+                    (five or {}).get("used_percent"),
+                    (weekly or {}).get("used_percent"),
+                )
+                if value is not None
+            ]
+            exhausted = bool(used) and max(used) >= 95
+            reset_candidates = [
+                window.get("reset_at")
+                for window in (five, weekly)
+                if window and window.get("used_percent", 0) >= 95 and window.get("reset_at")
+            ]
+            capacity_rows.append(
+                {
+                    "family": "claude",
+                    "id": lane["email"],
+                    "email": lane["email"],
+                    "resource": lane["email"],
+                    "active": lane.get("active", lane["email"] == active),
+                    "enrolled": lane.get("enrolled", False),
+                    "five_hour": five,
+                    "weekly": weekly,
+                    "learned_capacity": None,
+                    "limited_until": max(reset_candidates) if reset_candidates else None,
+                    "confidence": "live" if used else "estimated",
+                    "status": "exhausted" if exhausted else status,
+                    "dispatchable": bool(lane.get("enrolled"))
+                    and status == "ok"
+                    and not exhausted,
+                }
+            )
+        monkeypatch.setattr(
+            cli.capacity,
+            "build",
+            lambda: {"generated_at": "2026-07-18T12:00:00-04:00", "accounts": capacity_rows},
+        )
+        monkeypatch.setattr(
+            claude,
+            "accounts_report",
+            lambda *args, **kwargs: pytest.fail("setup-token usage probe must not run"),
+        )
 
     def test_best_email_on_stdout(self, env_paths, monkeypatch, capsys):
         self._patch_rows(monkeypatch, [
@@ -206,20 +252,156 @@ class TestClaudePickCli:
         assert cli.main(["pick", "claude", "--no-handicap"]) == 0
         assert capsys.readouterr().out.strip() == "anchor@example.com"
 
-    def test_cached_uses_snapshot(self, env_paths, monkeypatch, capsys):
-        from carpool import paths
-        from carpool.util import atomic_write_json
-
-        atomic_write_json(paths.snapshot_path(), {
-            "generated_at": iso(now_local()),
-            "claude": {"accounts": [lane_row("cached@example.com", fh=5, wk=5)]},
-        })
-        # Live probes must not run in cached mode.
-        monkeypatch.setattr(claude, "accounts_report",
-                            lambda *a, **k: pytest.fail("live probe in --cached"))
+    def test_cached_uses_unified_capacity_report(self, env_paths, monkeypatch, capsys):
+        self._patch_rows(monkeypatch, [lane_row("cached@example.com", fh=5, wk=5)])
         rc = cli.main(["pick", "claude", "--cached"])
         assert rc == 0
         assert capsys.readouterr().out.strip() == "cached@example.com"
+
+
+def test_capacity_picker_accepts_uncalibrated_ledger_lane_and_uses_raw_tokens():
+    report = {
+        "accounts": [
+            {
+                "family": "claude",
+                "id": "busy@example.com",
+                "email": "busy@example.com",
+                "enrolled": True,
+                "dispatchable": True,
+                "status": "estimated",
+                "confidence": "estimated",
+                "five_hour": {"tokens": 300, "used_percent": None},
+                "weekly": {"tokens": 900, "used_percent": None},
+            },
+            {
+                "family": "claude",
+                "id": "fresh@example.com",
+                "email": "fresh@example.com",
+                "enrolled": True,
+                "dispatchable": True,
+                "status": "estimated",
+                "confidence": "estimated",
+                "five_hour": {"tokens": 50, "used_percent": None},
+                "weekly": {"tokens": 100, "used_percent": None},
+            },
+        ]
+    }
+
+    ranked, excluded = cli._capacity_lane_ranking(
+        report, handicap=10, min_headroom=5
+    )
+
+    assert [row["email"] for row in ranked] == [
+        "fresh@example.com",
+        "busy@example.com",
+    ]
+    assert excluded == []
+    assert all(row["score"] is None for row in ranked)
+
+
+def test_uncalibrated_picker_displays_estimated_token_usage(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.capacity,
+        "build",
+        lambda: {
+            "generated_at": "2026-07-18T12:00:00-04:00",
+            "accounts": [
+                {
+                    "family": "claude",
+                    "id": "lane@example.com",
+                    "email": "lane@example.com",
+                    "enrolled": True,
+                    "dispatchable": True,
+                    "status": "estimated",
+                    "confidence": "estimated",
+                    "five_hour": {"tokens": 123, "used_percent": None},
+                    "weekly": {"tokens": 456, "used_percent": None},
+                }
+            ],
+        },
+    )
+
+    assert cli.main(["pick", "claude"]) == 0
+    output = capsys.readouterr()
+    assert output.out.strip() == "lane@example.com"
+    assert "5h 123 tok" in output.err
+    assert "[estimated]" in output.err
+
+
+def test_snapshot_uses_desktop_probe_and_ledger_for_enrolled_lanes(
+    env_paths, monkeypatch
+):
+    config.save(
+        {
+            "accounts": ["active@example.com", "lane@example.com"],
+            "enrolled": {
+                "active@example.com": "token-active",
+                "lane@example.com": "token-lane",
+            },
+            "codex_homes": [],
+        }
+    )
+    monkeypatch.setattr(
+        claude,
+        "identity",
+        lambda: {"email": "active@example.com", "organization": None},
+    )
+    monkeypatch.setattr(
+        claude,
+        "keychain_credentials",
+        lambda: {"status": "ok", "_token": "desktop-token"},
+    )
+    monkeypatch.setattr(claude, "transcript_limit_events", lambda **kwargs: [])
+    monkeypatch.setattr(
+        claude,
+        "session_mirror_health",
+        lambda **kwargs: {"status": "absent"},
+    )
+    monkeypatch.setattr(
+        claude,
+        "accounts_report",
+        lambda *args, **kwargs: pytest.fail("setup tokens must not be usage-probed"),
+    )
+    seen = []
+
+    def probe(token, timeout=15):
+        seen.append(token)
+        return {
+            "status": "ok",
+            "checked_at": "2026-07-18T12:00:00-04:00",
+            "five_hour": {"used_percent": 12},
+            "seven_day": {"used_percent": 34},
+            "windows": {},
+        }
+
+    result = snapshot.build(live=True, claude_probe_fn=probe)
+
+    assert seen == ["desktop-token"]
+    assert result["claude"]["lanes"]["enrolled"] == 2
+    assert result["claude"]["lanes"]["dispatchable_now"] == 2
+    assert all("probe" not in row for row in result["claude"]["accounts"])
+
+
+def test_snapshot_does_not_probe_claude_without_an_active_identity(monkeypatch):
+    monkeypatch.setattr(claude, "identity", lambda: {})
+    monkeypatch.setattr(
+        claude,
+        "keychain_credentials",
+        lambda: {"status": "skipped", "_token": None},
+    )
+    monkeypatch.setattr(claude, "transcript_limit_events", lambda **kwargs: [])
+    monkeypatch.setattr(
+        claude,
+        "session_mirror_health",
+        lambda **kwargs: {"status": "absent"},
+    )
+
+    result = snapshot.build(
+        live=True,
+        claude_probe_fn=lambda *args, **kwargs: pytest.fail("probe without identity"),
+    )
+
+    assert result["claude"]["oauth_probe"]["status"] == "no-identity"
 
 
 def lane_snap(lanes_fleet_dict):

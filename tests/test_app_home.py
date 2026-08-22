@@ -137,6 +137,17 @@ class TestLaneDiscovery:
         monkeypatch.setenv("CARPOOL_CODEX_HOMES", "")
         assert paths.codex_homes() == []
 
+    def test_explicit_config_cannot_turn_app_home_into_a_lane(self, tmp_path, monkeypatch):
+        app = tmp_path / ".codex"
+        lane = tmp_path / ".codex-1"
+        update_config(
+            codex_app_home=str(app),
+            codex_homes=[str(lane), str(app), str(lane)],
+        )
+        monkeypatch.delenv("CARPOOL_CODEX_APP_HOME", raising=False)
+
+        assert paths.codex_homes() == [lane]
+
     def test_app_home_env_overrides_public_config(self, monkeypatch, tmp_path):
         configured = tmp_path / "configured-app-home"
         overridden = tmp_path / "environment-app-home"

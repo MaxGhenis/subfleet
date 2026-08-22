@@ -4,7 +4,7 @@ verdicts. Every number carries its provenance (live probe vs observed-at)."""
 from datetime import timedelta
 from pathlib import Path
 
-from . import claude, codex, paths, run_ledger
+from . import capacity, claude, codex, paths, run_ledger
 from .util import atomic_write_json, iso, now_local, parse_iso, strip_private
 
 # A home is dispatchable only with at least this much 5h-window headroom.
@@ -193,20 +193,14 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
     ident = claude.identity()
     creds = claude.keychain_credentials()
     active_email = ident.get("email")
-    enrolled_map = claude.roster_config().get("enrolled") or {}
-    # One consumer per token bucket: once the active account has a dedicated
-    # enrolled token, the enrollment probe (accounts_report) owns it and the
-    # keychain-token probe stands down.
     if not live:
         cprobe = {"status": "skipped"}
-    elif active_email in enrolled_map:
-        cprobe = {"status": "delegated-to-enrollment"}
+    elif not (active_email or ident.get("account_uuid")):
+        cprobe = {"status": "no-identity"}
     else:
         cprobe = (claude_probe_fn or claude.probe_oauth_usage)(creds.get("_token"), timeout=timeout)
     events = claude.transcript_limit_events(hours=transcript_hours)
     active = claude.active_limit(events, now=now)
-
-    accounts = claude.accounts_report(active_email, timeout=timeout) if live else []
 
     def _probe_live(probe: dict, source: str) -> dict | None:
         if probe.get("status") != "ok":
@@ -234,18 +228,26 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
 
     active_live = _probe_live(cprobe, "oauth")
     active_probe_status = cprobe.get("status")
-    for row in accounts:
-        if not row["active"]:
-            continue
-        # The native login-token probe owns the active account unless that
-        # account has a dedicated enrolled token.
-        row_live = active_live or _probe_live(row.get("probe") or {}, "oauth-enrolled")
-        if row_live:
-            row["live"] = row_live
-            active_live = row_live
-        if (row.get("probe") or {}).get("status"):
-            active_probe_status = row["probe"]["status"]
-        row["oauth_status"] = active_probe_status
+    normalized = capacity.account_rows(
+        {"codex": [], "claude": {"identity": ident, "probe": cprobe}},
+        now=now,
+    )
+    claude_rows = [row for row in normalized if row.get("family") == "claude"]
+    accounts = [
+        {
+            "email": row.get("email") or row.get("id"),
+            "active": bool(row.get("active")),
+            "enrolled": bool(row.get("enrolled")),
+            **(
+                {
+                    "oauth_status": active_probe_status,
+                    **({"live": active_live} if active_live else {}),
+                }
+                if row.get("active") else {}
+            ),
+        }
+        for row in claude_rows
+    ]
 
     # Live data supersedes transcript inference: an observed "session limit"
     # error with a future reset can be stale (a new window opened since).
@@ -268,7 +270,7 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
     claude_section = {
         "account": ident,
         "accounts": accounts,
-        "lanes": claude.lanes_fleet(accounts),
+        "lanes": capacity.claude_lane_fleet(claude_rows),
         "known_accounts": claude.known_accounts(),
         "subscription": creds.get("subscription"),
         "tier": creds.get("tier"),
