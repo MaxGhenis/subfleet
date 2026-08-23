@@ -1,12 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "subfleet"
-version = "0.1.0"
-description = "Multi-account AI subscription monitoring and hardened task dispatch"
+version = "0.0.1"
+description = "A fleet of subs: run agentic AI work across every Claude Code and Codex subscription you own, without rotating logins"
 readme = "README.md"
 license = {file = "LICENSE"}
-authors = []
+authors = [{name = "Max Ghenis"}]
 requires-python = ">=3.12"
 dependencies = []
+keywords = ["claude-code", "codex", "agents", "quota", "dispatch", "subscriptions"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://maxghenis.com/subfleet"
+Repository = "https://github.com/MaxGhenis/subfleet"
+
+[project.scripts]
+subfleet = "subfleet.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["subfleet"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

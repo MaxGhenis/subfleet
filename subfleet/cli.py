@@ -545,6 +545,13 @@ def _exec_tool(name: str, rest: list[str]) -> int:
     path = _bin(name)
     if not os.access(path, os.X_OK):
         print(f"subfleet: tool missing or not executable: {path}", file=sys.stderr)
+        print(
+            "subfleet: this pip release covers the monitoring commands (status, "
+            "capacity, pick, runs, errors, watch, brief, enroll); the dispatch "
+            "runners ship with the repository checkout — "
+            "https://github.com/MaxGhenis/subfleet#quick-start",
+            file=sys.stderr,
+        )
         return 2
     os.execv(path, [path, *rest])
 
