@@ -2,8 +2,8 @@
 
 import json
 
-from carpool import codex, config, paths, render, snapshot, watchdog
-from carpool.util import now_local
+from subfleet import codex, config, paths, render, snapshot, watchdog
+from subfleet.util import now_local
 from conftest import make_auth_json, wham_ok
 
 
@@ -121,8 +121,8 @@ class TestLaneDiscovery:
         for name in (".codex", ".codex-1", ".codex-2", ".codex-5", ".codex-backup"):
             (fake_home / name).mkdir(parents=True)
         monkeypatch.setattr(paths, "HOME", fake_home)
-        monkeypatch.delenv("CARPOOL_CODEX_HOMES", raising=False)
-        monkeypatch.delenv("CARPOOL_CODEX_APP_HOME", raising=False)
+        monkeypatch.delenv("SUBFLEET_CODEX_HOMES", raising=False)
+        monkeypatch.delenv("SUBFLEET_CODEX_APP_HOME", raising=False)
         update_config(codex_homes=None, codex_app_home=None)
 
         assert [path.name for path in paths.codex_homes()] == [
@@ -134,7 +134,7 @@ class TestLaneDiscovery:
         assert paths.primary_codex_home() == fake_home / ".codex-1"
 
     def test_empty_override_means_no_lanes(self, monkeypatch):
-        monkeypatch.setenv("CARPOOL_CODEX_HOMES", "")
+        monkeypatch.setenv("SUBFLEET_CODEX_HOMES", "")
         assert paths.codex_homes() == []
 
     def test_explicit_config_cannot_turn_app_home_into_a_lane(self, tmp_path, monkeypatch):
@@ -144,7 +144,7 @@ class TestLaneDiscovery:
             codex_app_home=str(app),
             codex_homes=[str(lane), str(app), str(lane)],
         )
-        monkeypatch.delenv("CARPOOL_CODEX_APP_HOME", raising=False)
+        monkeypatch.delenv("SUBFLEET_CODEX_APP_HOME", raising=False)
 
         assert paths.codex_homes() == [lane]
 
@@ -152,7 +152,7 @@ class TestLaneDiscovery:
         configured = tmp_path / "configured-app-home"
         overridden = tmp_path / "environment-app-home"
         update_config(codex_app_home=str(configured))
-        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(overridden))
+        monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(overridden))
         assert paths.app_codex_home() == overridden
 
 
@@ -163,7 +163,7 @@ class TestProtectedAccount:
             codex_app_home=str(app),
             protected_account={"email": "fallback@example.com"},
         )
-        monkeypatch.delenv("CARPOOL_CODEX_APP_HOME", raising=False)
+        monkeypatch.delenv("SUBFLEET_CODEX_APP_HOME", raising=False)
 
         protected = codex.protected_account()
 
@@ -182,7 +182,7 @@ class TestProtectedAccount:
                 "account_id": "ACCT-FALLBACK",
             },
         )
-        monkeypatch.delenv("CARPOOL_CODEX_APP_HOME", raising=False)
+        monkeypatch.delenv("SUBFLEET_CODEX_APP_HOME", raising=False)
 
         protected = codex.protected_account()
 
@@ -192,7 +192,7 @@ class TestProtectedAccount:
 
     def test_app_identity_is_token_free(self, monkeypatch, tmp_path):
         app = bind(tmp_path / "app-home", "ACCT-APP", "app@example.com")
-        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+        monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
 
         identity = codex.app_home_identity()
 
@@ -212,7 +212,7 @@ class TestSnapshotShadowing:
             app_account,
             f"{app_account.lower()}@example.com",
         )
-        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+        monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
         return snapshot.build(live=False)
 
     def test_matching_lane_is_shadowed_and_app_is_not_a_duplicate(
@@ -243,7 +243,7 @@ class TestSnapshotShadowing:
         self, monkeypatch, tmp_path
     ):
         app = bind(tmp_path / "app-home", "ACCT-2", "two@example.com")
-        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+        monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
         lane_one = codex_entry("/lanes/.codex-1", 15, "ACCT-1")
         lane_two = codex_entry("/lanes/.codex-2", 10, "ACCT-2")
 
@@ -282,7 +282,7 @@ class TestWatchdogShadow:
         assert "codex-app-shadow:/lanes/.codex-2" not in second["alerts_sent"]
         notice = env_paths["notify_log"].read_text()
         assert "two@example.com" in notice
-        assert "carpool login codex" in notice
+        assert "subfleet login codex" in notice
 
     def test_moving_app_account_alerts_new_lane_without_recovery_noise(self, env_paths):
         watchdog.run(snap=shadow_snapshot())
@@ -350,7 +350,7 @@ class TestFreePlanGuard:
         notice = env_paths["notify_log"].read_text().lower()
         assert "free@example.com" in notice
         assert "paid" in notice or "pro" in notice
-        assert "carpool login codex" in notice
+        assert "subfleet login codex" in notice
 
         upgraded = snapshot_document(
             [

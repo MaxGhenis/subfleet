@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from carpool import config, login, paths
+from subfleet import config, login, paths
 
 
 def _auth(home: Path, account: str) -> None:
@@ -28,7 +28,7 @@ def _fake_codex(tmp_path: Path, url: str = "https://auth.example.test/authorize?
 
 def test_target_maps_number_and_configured_app_home(tmp_path, monkeypatch):
     app = tmp_path / "desktop-state"
-    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+    monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
 
     assert login._target_home("app") == (app, "app")
     home, slot = login._target_home("07")
@@ -73,7 +73,7 @@ def test_bad_target_is_rejected(target):
 
 def test_stages_detached_server_in_configured_state(tmp_path, monkeypatch, capsys):
     state = tmp_path / "runtime"
-    monkeypatch.setenv("CARPOOL_STATE_DIR", str(state))
+    monkeypatch.setenv("SUBFLEET_STATE_DIR", str(state))
     executable = _fake_codex(tmp_path)
 
     assert login.codex_login(
@@ -141,7 +141,7 @@ def test_reports_numbered_duplicates_separately_from_app_shadow(tmp_path, monkey
     _auth(lane1, "account-a")
     _auth(lane2, "account-b")
     _auth(lane3, "account-b")
-    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+    monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
     config.save(
         {
             "accounts": [],
@@ -173,7 +173,7 @@ def test_completion_notifies_shadow_and_runs_configured_refresh(tmp_path, monkey
     _auth(app, "account-a")
     _auth(lane, "account-a")
     _pending_files(state, "1", complete=True)
-    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+    monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
     config.save(
         {
             "accounts": [],
@@ -244,9 +244,9 @@ def test_timeout_notifies_pending(monkeypatch):
 
 
 def test_watcher_entrypoint_is_executable_and_repo_relative():
-    watcher = Path(__file__).resolve().parents[1] / "bin" / "carpool-login-watch"
+    watcher = Path(__file__).resolve().parents[1] / "bin" / "subfleet-login-watch"
     text = watcher.read_text()
 
     assert os.access(watcher, os.X_OK)
     assert 'ROOT=$(dirname -- "$SCRIPT_DIR")' in text
-    assert "-m carpool.login" in text
+    assert "-m subfleet.login" in text

@@ -133,7 +133,7 @@ def _mirror_run_minutes(runner=subprocess.run) -> float | None:
     """Return the age of an in-flight mirror pass, if one can be observed."""
     try:
         result = runner(
-            ["pgrep", "-f", "bin/carpool-mirror"],
+            ["pgrep", "-f", "bin/subfleet-mirror"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -360,7 +360,7 @@ def probe_oauth_usage(token: str | None, timeout: float = 15.0, opener=None) -> 
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Accept": "application/json",
-            "User-Agent": "carpool/0.1",
+            "User-Agent": "subfleet/0.1",
         },
     )
 

@@ -30,7 +30,7 @@ from . import config
 from .util import from_epoch, iso, jwt_claims, now_local, parse_iso, parse_reset_clock
 
 WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-USER_AGENT = "carpool/0.1 (codex_cli_rs compatible)"
+USER_AGENT = "subfleet/0.1 (codex_cli_rs compatible)"
 
 USAGE_LIMIT_RE = re.compile(
     r"You've hit your usage limit[^\"\\]{0,120}?try again at (\d{1,2}:\d{2}\s*[AP]\.?M)",
@@ -251,7 +251,7 @@ REFRESH_PROBE_PROMPT = "Reply with exactly: ok"
 
 
 def _codex_binary() -> str | None:
-    """Resolve the real CLI without ever returning carpool's PATH shim."""
+    """Resolve the real CLI without ever returning subfleet's PATH shim."""
     import shutil
 
     repository_shim = (Path(__file__).resolve().parent.parent / "bin" / "codex").resolve()
@@ -273,7 +273,7 @@ def _codex_binary() -> str | None:
             return None
         return str(path)
 
-    override = os.environ.get("CARPOOL_CODEX_BIN")
+    override = os.environ.get("SUBFLEET_CODEX_BIN")
     if override:
         return usable(override)
 

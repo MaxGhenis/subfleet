@@ -1,6 +1,6 @@
 # Codex command guard
 
-`carpool codex` installs `bin/carpool-guard-hook` as a trusted Codex
+`subfleet codex` installs `bin/subfleet-guard-hook` as a trusted Codex
 `PreToolUse` hook for shell commands. The hook is intentionally small and
 portable: it protects only operations whose risk comes from the local machine
 or Git repository, with no organization-, service-, account-, or project-
@@ -8,7 +8,7 @@ specific rules.
 
 The launcher refuses to start a guarded Codex session unless the installed
 Codex app-server reports the hook as enabled and trusted. Set
-`CARPOOL_CODEX_GUARD=off` only when you have reviewed the command risk and need
+`SUBFLEET_CODEX_GUARD=off` only when you have reviewed the command risk and need
 an explicit one-run bypass.
 
 ## Policies
@@ -51,11 +51,11 @@ prints a Codex hook decision:
 
 Malformed JSON, missing fields, unrelated hook events, other tools, and a
 missing JSON parser all fail open without a decision. This keeps a broken
-optional hook from corrupting tool execution. `carpool-guard preflight` is the
+optional hook from corrupting tool execution. `subfleet-guard preflight` is the
 separate fail-closed boundary: a session is not launched if Codex cannot load
 and trust the hook.
 
-Denial logging is off by default. Set `CARPOOL_GUARD_LOG` to a file path to
+Denial logging is off by default. Set `SUBFLEET_GUARD_LOG` to a file path to
 append timestamp, working directory, and a shortened one-line command. A log
 write failure never changes the decision.
 
@@ -64,10 +64,10 @@ write failure never changes the decision.
 Inspect decisions without launching Codex:
 
 ```bash
-carpool-guard check 'find / -name result'
-carpool-guard check 'find / -maxdepth 2 -name result'
-carpool-guard check 'git stash pop' /path/to/a/linked-worktree
-printf '%s\n' 'rg needle $HOME' | carpool-guard check -
+subfleet-guard check 'find / -name result'
+subfleet-guard check 'find / -maxdepth 2 -name result'
+subfleet-guard check 'git stash pop' /path/to/a/linked-worktree
+printf '%s\n' 'rg needle $HOME' | subfleet-guard check -
 ```
 
 `check` prints `allow` and exits zero, or prints `deny: ...` and exits one. It
@@ -77,10 +77,10 @@ and `--tool` can verify that irrelevant tool names pass through.
 The trust helpers are:
 
 ```bash
-carpool-guard hash
-carpool-guard override
-carpool-guard key
-carpool-guard preflight -H "$CODEX_HOME" -C "$PWD" --codex /path/to/codex
+subfleet-guard hash
+subfleet-guard override
+subfleet-guard key
+subfleet-guard preflight -H "$CODEX_HOME" -C "$PWD" --codex /path/to/codex
 ```
 
 `hash` reproduces Codex's normalized hook-identity SHA-256. `override` prints
@@ -98,9 +98,9 @@ probe write to the supplied home.
 Successful preflights are cached using the Codex binary and version, supplied
 home path, full hook override, and seed-file fingerprint. A configuration edit
 or upgrade therefore triggers a fresh check. `--no-cache` bypasses both reads
-and writes. Override the cache with `CARPOOL_GUARD_CACHE`; stale markers are
+and writes. Override the cache with `SUBFLEET_GUARD_CACHE`; stale markers are
 pruned after 30 days when a new result is written. The app-server deadline is
-controlled by `CARPOOL_GUARD_PREFLIGHT_TIMEOUT`.
+controlled by `SUBFLEET_GUARD_PREFLIGHT_TIMEOUT`.
 
 ## After a Codex upgrade
 

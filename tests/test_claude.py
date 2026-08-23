@@ -2,8 +2,8 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
-from carpool import claude, config
-from carpool.util import now_local
+from subfleet import claude, config
+from subfleet.util import now_local
 
 
 def write_transcript(projects_dir, name, events):

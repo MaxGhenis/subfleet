@@ -6,9 +6,9 @@ from datetime import timedelta
 
 import pytest
 
-from carpool import capacity, claude, cli, config, snapshot, watchdog
-from carpool.claude import lane_verdict, lanes_fleet, rank_lanes
-from carpool.util import iso, now_local
+from subfleet import capacity, claude, cli, config, snapshot, watchdog
+from subfleet.claude import lane_verdict, lanes_fleet, rank_lanes
+from subfleet.util import iso, now_local
 
 
 def lane_row(email, fh=None, wk=None, enrolled=True, active=False, status="ok",
@@ -226,7 +226,7 @@ class TestClaudePickCli:
         err = capsys.readouterr().err
         assert rc == 1
         assert "claude setup-token" in err
-        assert "carpool enroll" in err
+        assert "subfleet enroll" in err
 
     def test_json_ranking_and_exclusions(self, env_paths, monkeypatch, capsys):
         self._patch_rows(monkeypatch, [
@@ -442,7 +442,7 @@ class TestWatchdogLaneConditions:
         summary = watchdog.run(snap=s)
         assert "claude-lane-auth:broken@example.com" in summary["alerts_sent"]
         log = env_paths["notify_log"].read_text()
-        assert "carpool enroll broken@example.com" in log
+        assert "subfleet enroll broken@example.com" in log
 
     def test_all_lanes_exhausted_warns_only_when_enrolled(self, env_paths):
         empty = lane_snap(lanes_fleet([]))
@@ -461,7 +461,7 @@ class TestWatchdogLaneConditions:
 
 class TestLaneRender:
     def test_table_shows_lane_rows_and_fleet_line(self, env_paths):
-        from carpool import render
+        from subfleet import render
 
         s = lane_snap(lanes_fleet([
             lane_row("alpha@example.com", fh=12, wk=34),

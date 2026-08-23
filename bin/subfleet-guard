@@ -1,14 +1,14 @@
 #!/bin/bash
-# Build, inspect, and verify the Codex hook override used by carpool.
+# Build, inspect, and verify the Codex hook override used by subfleet.
 #
 # Usage:
-#   carpool-guard check [--hook <absolute-path>] [--tool <name>] <command|-> [cwd]
-#   carpool-guard hash [--hook <absolute-path>] [--timeout <seconds>]
+#   subfleet-guard check [--hook <absolute-path>] [--tool <name>] <command|-> [cwd]
+#   subfleet-guard hash [--hook <absolute-path>] [--timeout <seconds>]
 #                      [--matcher <matcher>] [--status <message>]
-#   carpool-guard override [--hook <absolute-path>] [--timeout <seconds>]
+#   subfleet-guard override [--hook <absolute-path>] [--timeout <seconds>]
 #                          [--matcher <matcher>] [--status <message>]
-#   carpool-guard key
-#   carpool-guard preflight -H <codex-home> -C <workdir> [--codex <binary>]
+#   subfleet-guard key
+#   subfleet-guard preflight -H <codex-home> -C <workdir> [--codex <binary>]
 #                            [--no-cache] [common override options]
 #
 # `preflight` asks the local Codex app-server to list the configured hook and
@@ -18,13 +18,13 @@
 # identity, lane path, and configuration fingerprint.
 #
 # Environment overrides:
-#   CARPOOL_GUARD_HOOK                 default hook path
-#   CARPOOL_GUARD_TIMEOUT              hook timeout (default 60)
-#   CARPOOL_GUARD_MATCHER              hook matcher (default Bash)
-#   CARPOOL_GUARD_STATUS               hook status message
-#   CARPOOL_CODEX_BINARY               binary used by preflight
-#   CARPOOL_GUARD_CACHE                preflight cache directory
-#   CARPOOL_GUARD_PREFLIGHT_TIMEOUT    app-server deadline (default 60 seconds)
+#   SUBFLEET_GUARD_HOOK                 default hook path
+#   SUBFLEET_GUARD_TIMEOUT              hook timeout (default 60)
+#   SUBFLEET_GUARD_MATCHER              hook matcher (default Bash)
+#   SUBFLEET_GUARD_STATUS               hook status message
+#   SUBFLEET_CODEX_BINARY               binary used by preflight
+#   SUBFLEET_GUARD_CACHE                preflight cache directory
+#   SUBFLEET_GUARD_PREFLIGHT_TIMEOUT    app-server deadline (default 60 seconds)
 #
 # Bash 3.2 compatible. Usage errors exit 2.
 set -u
@@ -32,15 +32,15 @@ export LC_ALL=C
 
 SELF=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
 HERE=$(cd "$(dirname "$SELF")" && pwd)
-HOOK=${CARPOOL_GUARD_HOOK:-$HERE/carpool-guard-hook}
-TIMEOUT=${CARPOOL_GUARD_TIMEOUT:-60}
-MATCHER=${CARPOOL_GUARD_MATCHER:-Bash}
-STATUS_MSG=${CARPOOL_GUARD_STATUS:-carpool safety guard}
+HOOK=${SUBFLEET_GUARD_HOOK:-$HERE/subfleet-guard-hook}
+TIMEOUT=${SUBFLEET_GUARD_TIMEOUT:-60}
+MATCHER=${SUBFLEET_GUARD_MATCHER:-Bash}
+STATUS_MSG=${SUBFLEET_GUARD_STATUS:-subfleet safety guard}
 KEY='/<session-flags>/config.toml:pre_tool_use:0:0'
 SEED_FILES="config.toml hooks.json"
 CODEX_HOME_ARG=""
 WORKDIR=""
-CODEX_BIN_ARG="${CARPOOL_CODEX_BINARY:-}"
+CODEX_BIN_ARG="${SUBFLEET_CODEX_BINARY:-}"
 NO_CACHE=""
 JQ=""
 
@@ -51,8 +51,8 @@ usage() {
 
 need_jq() {
   if [ -n "$JQ" ] && [ -x "$JQ" ]; then return 0; fi
-  if [ -n "${CARPOOL_JQ:-}" ] && [ -x "$CARPOOL_JQ" ]; then
-    JQ=$CARPOOL_JQ
+  if [ -n "${SUBFLEET_JQ:-}" ] && [ -x "$SUBFLEET_JQ" ]; then
+    JQ=$SUBFLEET_JQ
     return 0
   fi
   if command -v jq >/dev/null 2>&1; then
@@ -62,7 +62,7 @@ need_jq() {
   for candidate in /opt/homebrew/bin/jq /usr/bin/jq; do
     if [ -x "$candidate" ]; then JQ=$candidate; return 0; fi
   done
-  echo "carpool-guard: jq not found" >&2
+  echo "subfleet-guard: jq not found" >&2
   exit 1
 }
 
@@ -74,7 +74,7 @@ sha256_stream() {
   elif command -v openssl >/dev/null 2>&1; then
     openssl dgst -sha256 | sed 's/^.*= //'
   else
-    echo "carpool-guard: no SHA-256 utility found" >&2
+    echo "subfleet-guard: no SHA-256 utility found" >&2
     return 1
   fi
 }
@@ -120,20 +120,20 @@ build_override() {
 validate_common() {
   case "$TIMEOUT" in
     ''|*[!0-9]*|0)
-      echo "carpool-guard: timeout must be a positive integer" >&2
+      echo "subfleet-guard: timeout must be a positive integer" >&2
       exit 2 ;;
   esac
   case "$HOOK" in
     /*) ;;
-    *) echo "carpool-guard: hook path must be absolute" >&2; exit 2 ;;
+    *) echo "subfleet-guard: hook path must be absolute" >&2; exit 2 ;;
   esac
   case "$MATCHER" in
     ''|*[!A-Za-z0-9_|]*)
-      echo "carpool-guard: matcher must contain only letters, digits, _, or |" >&2
+      echo "subfleet-guard: matcher must contain only letters, digits, _, or |" >&2
       exit 2 ;;
   esac
   if printf '%s' "$STATUS_MSG" | grep -q '[[:cntrl:]]'; then
-    echo "carpool-guard: status message must be one line" >&2
+    echo "subfleet-guard: status message must be one line" >&2
     exit 2
   fi
 }
@@ -171,14 +171,14 @@ cmd_check() {
   cwd=${2:-$PWD}
   [ "$command" = "-" ] && command=$(cat)
   [ -x "$HOOK" ] || {
-    echo "carpool-guard: hook is not executable: $HOOK" >&2
+    echo "subfleet-guard: hook is not executable: $HOOK" >&2
     exit 1
   }
   payload=$("$JQ" -cn --arg cwd "$cwd" --arg command "$command" \
     --arg tool "$tool_name" \
-    '{session_id:"carpool-guard-check",turn_id:"carpool-guard-check",tool_use_id:"carpool-guard-check",hook_event_name:"PreToolUse",permission_mode:"never",tool_name:$tool,cwd:$cwd,tool_input:{command:$command}}') \
+    '{session_id:"subfleet-guard-check",turn_id:"subfleet-guard-check",tool_use_id:"subfleet-guard-check",hook_event_name:"PreToolUse",permission_mode:"never",tool_name:$tool,cwd:$cwd,tool_input:{command:$command}}') \
     || exit 1
-  output=$(printf '%s' "$payload" | CARPOOL_GUARD_LOG="" "$HOOK")
+  output=$(printf '%s' "$payload" | SUBFLEET_GUARD_LOG="" "$HOOK")
   if [ -z "$output" ]; then
     echo "allow"
     exit 0
@@ -272,10 +272,10 @@ cmd_preflight() {
     echo "preflight: codex --version printed nothing" >&2
     exit 1
   }
-  deadline=${CARPOOL_GUARD_PREFLIGHT_TIMEOUT:-60}
+  deadline=${SUBFLEET_GUARD_PREFLIGHT_TIMEOUT:-60}
   case "$deadline" in
     ''|*[!0-9]*|0)
-      echo "preflight: CARPOOL_GUARD_PREFLIGHT_TIMEOUT must be a positive integer" >&2
+      echo "preflight: SUBFLEET_GUARD_PREFLIGHT_TIMEOUT must be a positive integer" >&2
       exit 1 ;;
   esac
 
@@ -287,14 +287,14 @@ cmd_preflight() {
   config_hash=$(seed_fingerprint "$home") || exit 1
   cache_key=$(printf '%s' "$CODEX_BIN_ARG|$version|$home|$override|$config_hash" \
     | sha256_stream) || exit 1
-  cache_dir=${CARPOOL_GUARD_CACHE:-${CARPOOL_CODEX_GUARD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/carpool/guard}}
+  cache_dir=${SUBFLEET_GUARD_CACHE:-${SUBFLEET_CODEX_GUARD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/subfleet/guard}}
   marker="$cache_dir/ok-$cache_key"
   if [ -z "$NO_CACHE" ] && [ -f "$marker" ]; then
     echo "preflight: cached ok ($version)"
     exit 0
   fi
 
-  scratch=$(mktemp -d "${TMPDIR:-/tmp}/carpool-guard-preflight.XXXXXX") || {
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/subfleet-guard-preflight.XXXXXX") || {
     echo "preflight: could not create scratch directory" >&2
     exit 1
   }
@@ -317,7 +317,7 @@ cmd_preflight() {
     fi
   done
 
-  initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"carpool-guard-preflight","title":"carpool guard preflight","version":"1"}}}'
+  initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"subfleet-guard-preflight","title":"subfleet guard preflight","version":"1"}}}'
   initialized='{"jsonrpc":"2.0","method":"initialized","params":{}}'
   list_request=$("$JQ" -cn --arg cwd "$workdir" \
     '{jsonrpc:"2.0",id:2,method:"hooks/list",params:{cwds:[$cwd]}}') || {

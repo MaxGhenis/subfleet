@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from carpool import codex
-from carpool.util import parse_reset_clock
+from subfleet import codex
+from subfleet.util import parse_reset_clock
 
 from conftest import make_auth_json
 
@@ -159,7 +159,7 @@ class TestScanCache:
                  "You've hit your usage limit. Visit x or try again at 4:44 PM."}}))
         second = codex.recent_limit_errors(home, hours=24 * 365 * 10)
         assert {e["try_again"] for e in second["usage_limit"]} == {"11:33 PM", "4:44 PM"}
-        from carpool import paths
+        from subfleet import paths
 
         assert paths.rollout_cache_path().exists()
 

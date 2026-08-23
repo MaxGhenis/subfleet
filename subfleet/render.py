@@ -140,7 +140,7 @@ def table(snap: dict) -> str:
         else:
             detail = f"heartbeat idle {mirror.get('age_min', '?')} min"
         lines.append(
-            f"  session mirror STALLED ({detail}); heal: carpool mirror --quiet"
+            f"  session mirror STALLED ({detail}); heal: subfleet mirror --quiet"
         )
     accounts = c.get("accounts") or []
     fleet_c = c.get("lanes") or {}
@@ -191,7 +191,7 @@ def table(snap: dict) -> str:
         lines.append(
             f"  not enrolled ({len(unenrolled)}): "
             + ", ".join(a["email"].split("@")[1] for a in unenrolled)
-            + "  — enroll: claude setup-token | carpool enroll <email>"
+            + "  — enroll: claude setup-token | subfleet enroll <email>"
         )
     return "\n".join(lines)
 
@@ -262,7 +262,7 @@ def brief_md(snap: dict) -> str:
         lines.append(
             "- ⚠ codex auth: "
             + "; ".join(problems)
-            + " — fix: `carpool login codex <N|app>`"
+            + " — fix: `subfleet login codex <N|app>`"
         )
 
     claude_section = snap["claude"]

@@ -86,7 +86,7 @@ def _reenroll_ritual(email: str) -> str:
     secret_name = config.secret_name_for(email, require_enrolled=False)
     return (
         f"Re-enroll lane {email}: run `claude setup-token` while signed into {email}, "
-        f"then run `carpool enroll {email}` (secret item `{secret_name}`)."
+        f"then run `subfleet enroll {email}` (secret item `{secret_name}`)."
     )
 
 
@@ -154,7 +154,7 @@ def _enrolled() -> list[str]:
 
 def _active_desktop_email() -> str | None:
     try:
-        binary = _discover_tool("carpool", "DELEGATE_CARPOOL")
+        binary = _discover_tool("subfleet", "DELEGATE_SUBFLEET")
         cp = subprocess.run([binary, "status", "--cached", "--json"], capture_output=True, text=True)
         if cp.returncode:
             return None
@@ -272,7 +272,7 @@ def _append_decision(record: dict[str, Any]) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="carpool run")
+    p = argparse.ArgumentParser(prog="subfleet run")
     p.add_argument("-t", choices=("fable", "review", "build", "sweep"))
     p.add_argument("-m", choices=("fable", "sol", "terra", "haiku"))
     resources = p.add_mutually_exclusive_group()
@@ -305,14 +305,14 @@ def _status() -> int:
         print(f"  {email}: " + (f"cooldown until {until.isoformat()}" if until > now else "available"))
     try:
         cp = subprocess.run(
-            [_discover_tool("carpool", "DELEGATE_CARPOOL"), "pick", "codex", "--json", "--all"],
+            [_discover_tool("subfleet", "DELEGATE_SUBFLEET"), "pick", "codex", "--json", "--all"],
             text=True,
             capture_output=True,
         )
         sys.stdout.write(cp.stdout)
         sys.stderr.write(cp.stderr)
     except OSError as exc:
-        print(f"delegate: carpool pick codex unavailable: {exc}", file=sys.stderr)
+        print(f"delegate: subfleet pick codex unavailable: {exc}", file=sys.stderr)
     return 0
 
 
@@ -471,7 +471,7 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                 cmd: list[str] = []
             else:
                 try:
-                    runner = _discover_tool("carpool-codex", "DELEGATE_CODEX_RUN")
+                    runner = _discover_tool("subfleet-codex", "DELEGATE_CODEX_RUN")
                 except FileNotFoundError as exc:
                     print(f"delegate: {exc}", file=sys.stderr)
                     cmd = []
@@ -505,7 +505,7 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
             else:
                 tried.add(lane_or_home); attempts += 1
                 try:
-                    runner = _discover_tool("carpool-claude", "DELEGATE_CLAUDE_LANE")
+                    runner = _discover_tool("subfleet-claude", "DELEGATE_CLAUDE_LANE")
                 except FileNotFoundError as exc:
                     print(f"delegate: {exc}", file=sys.stderr)
                     cmd = []

@@ -1,4 +1,4 @@
-"""Focused subprocess contracts for the unified ``carpool claude`` runner."""
+"""Focused subprocess contracts for the unified ``subfleet claude`` runner."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "bin" / "carpool-claude"
+SCRIPT = ROOT / "bin" / "subfleet-claude"
 
 
 def _write_executable(path: Path, body: str) -> Path:
@@ -28,18 +28,18 @@ def _fixture(tmp_path: Path, claude_body: str) -> tuple[dict[str, str], dict[str
     prompt = tmp_path / "prompt.md"
     prompt.write_text("do the example task\n")
     output = tmp_path / "answer.md"
-    calls = tmp_path / "carpool.calls"
+    calls = tmp_path / "subfleet.calls"
 
     claude = _write_executable(fake_bin / "claude", claude_body)
-    carpool = _write_executable(
-        fake_bin / "carpool",
+    subfleet = _write_executable(
+        fake_bin / "subfleet",
         r'''log_call() {
   {
     printf '%s' "${1:-}"
     shift || true
     for arg in "$@"; do printf '\t%s' "$arg"; done
     printf '\n'
-  } >>"$CARPOOL_CALLS"
+  } >>"$SUBFLEET_CALLS"
 }
 
 log_call "$@"
@@ -109,10 +109,10 @@ printf '00000000-0000-4000-8000-%012d\n' "$count"
         {
             "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
             "CLAUDE_LANE_CLAUDE": os.fspath(claude),
-            "CLAUDE_LANE_CARPOOL": os.fspath(carpool),
+            "CLAUDE_LANE_SUBFLEET": os.fspath(subfleet),
             "CLAUDE_LANE_CLAUDE_DIR": os.fspath(tmp_path / "claude-state"),
             "CLAUDE_LANE_BACKOFF": "0",
-            "CARPOOL_CALLS": os.fspath(calls),
+            "SUBFLEET_CALLS": os.fspath(calls),
             "UUID_COUNTER": os.fspath(tmp_path / "uuid-counter"),
         }
     )
@@ -456,7 +456,7 @@ printf '{"is_error":false,"result":"detached read: %s"}\n' "$prompt"
     while time.monotonic() < deadline and (
         not paths["output"].exists()
         or not child_env.exists()
-        or list(prompt_root.glob("carpool-claude-prompt.*"))
+        or list(prompt_root.glob("subfleet-claude-prompt.*"))
     ):
         time.sleep(0.05)
 
@@ -465,7 +465,7 @@ printf '{"is_error":false,"result":"detached read: %s"}\n' "$prompt"
     assert "CLAUDE_LANE_DETACHED" not in child_keys
     assert "CLAUDE_LANE_OWNED_PROMPT" not in child_keys
     assert "CLAUDE_LANE_DETACHED_PROMPT" not in child_keys
-    assert list(prompt_root.glob("carpool-claude-prompt.*")) == []
+    assert list(prompt_root.glob("subfleet-claude-prompt.*")) == []
 
 
 def test_runner_source_uses_only_the_public_secret_bridge():

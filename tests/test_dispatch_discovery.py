@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from carpool import delegate
+from subfleet import delegate
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +23,9 @@ def make_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
 @pytest.mark.parametrize(
     ("name", "env_var"),
     [
-        ("carpool", "DELEGATE_CARPOOL"),
-        ("carpool-codex", "DELEGATE_CODEX_RUN"),
-        ("carpool-claude", "DELEGATE_CLAUDE_LANE"),
+        ("subfleet", "DELEGATE_SUBFLEET"),
+        ("subfleet-codex", "DELEGATE_CODEX_RUN"),
+        ("subfleet-claude", "DELEGATE_CLAUDE_LANE"),
     ],
 )
 def test_repo_bin_precedes_path(name, env_var, tmp_path, monkeypatch):
@@ -38,35 +38,35 @@ def test_repo_bin_precedes_path(name, env_var, tmp_path, monkeypatch):
 
 def test_explicit_tool_override_precedes_discovery(tmp_path, monkeypatch):
     override = make_executable(tmp_path / "custom" / "picker")
-    monkeypatch.setenv("DELEGATE_CARPOOL", str(override))
+    monkeypatch.setenv("DELEGATE_SUBFLEET", str(override))
 
-    assert Path(delegate._discover_tool("carpool", "DELEGATE_CARPOOL")) == override
+    assert Path(delegate._discover_tool("subfleet", "DELEGATE_SUBFLEET")) == override
 
 
 def test_path_fallback_when_repo_copy_is_absent(tmp_path, monkeypatch):
-    fake_module = tmp_path / "isolated-repo" / "carpool" / "delegate.py"
+    fake_module = tmp_path / "isolated-repo" / "subfleet" / "delegate.py"
     fake_module.parent.mkdir(parents=True)
-    path_tool = make_executable(tmp_path / "path-bin" / "carpool")
+    path_tool = make_executable(tmp_path / "path-bin" / "subfleet")
     monkeypatch.setattr(delegate, "__file__", str(fake_module))
-    monkeypatch.delenv("DELEGATE_CARPOOL", raising=False)
+    monkeypatch.delenv("DELEGATE_SUBFLEET", raising=False)
     monkeypatch.setenv("PATH", str(path_tool.parent))
 
-    assert Path(delegate._discover_tool("carpool", "DELEGATE_CARPOOL")) == path_tool
+    assert Path(delegate._discover_tool("subfleet", "DELEGATE_SUBFLEET")) == path_tool
 
 
 def test_missing_tool_raises_clear_error(tmp_path, monkeypatch):
-    fake_module = tmp_path / "isolated-repo" / "carpool" / "delegate.py"
+    fake_module = tmp_path / "isolated-repo" / "subfleet" / "delegate.py"
     fake_module.parent.mkdir(parents=True)
     monkeypatch.setattr(delegate, "__file__", str(fake_module))
-    monkeypatch.delenv("DELEGATE_CARPOOL", raising=False)
+    monkeypatch.delenv("DELEGATE_SUBFLEET", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
-    with pytest.raises(FileNotFoundError, match="carpool"):
-        delegate._discover_tool("carpool", "DELEGATE_CARPOOL")
+    with pytest.raises(FileNotFoundError, match="subfleet"):
+        delegate._discover_tool("subfleet", "DELEGATE_SUBFLEET")
 
 
-def test_carpool_launcher_is_executable_and_works_outside_repo(tmp_path):
-    shim = BIN_DIR / "carpool"
+def test_subfleet_launcher_is_executable_and_works_outside_repo(tmp_path):
+    shim = BIN_DIR / "subfleet"
     assert shim.is_file()
     assert os.access(shim, os.X_OK)
 
@@ -83,7 +83,7 @@ def test_carpool_launcher_is_executable_and_works_outside_repo(tmp_path):
     assert "usage:" in cp.stdout.lower()
 
 
-def test_carpool_run_uses_temp_config_and_shared_state(tmp_path):
+def test_subfleet_run_uses_temp_config_and_shared_state(tmp_path):
     config_dir = tmp_path / "config"
     state_home = tmp_path / "state"
     workdir = tmp_path / "work"
@@ -94,7 +94,7 @@ def test_carpool_run_uses_temp_config_and_shared_state(tmp_path):
         json.dumps({"accounts": [], "enrolled": {}, "codex_homes": [codex_home]})
     )
     checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    capacity_state = state_home / "carpool"
+    capacity_state = state_home / "subfleet"
     capacity_state.mkdir(parents=True)
     (capacity_state / "capacity-cache.json").write_text(
         json.dumps(
@@ -124,14 +124,14 @@ def test_carpool_run_uses_temp_config_and_shared_state(tmp_path):
     )
     env = {
         **os.environ,
-        "CARPOOL_CONFIG_DIR": str(config_dir),
+        "SUBFLEET_CONFIG_DIR": str(config_dir),
         "XDG_STATE_HOME": str(state_home),
         "HOME": str(tmp_path / "home"),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 
     cp = subprocess.run(
-        [str(BIN_DIR / "carpool"), "run", "--dry-run", "--why", "fix the failing test"],
+        [str(BIN_DIR / "subfleet"), "run", "--dry-run", "--why", "fix the failing test"],
         cwd=workdir,
         capture_output=True,
         text=True,
@@ -140,11 +140,11 @@ def test_carpool_run_uses_temp_config_and_shared_state(tmp_path):
     )
 
     assert cp.returncode == 0, cp.stderr
-    assert str(BIN_DIR / "carpool-codex") in cp.stdout
+    assert str(BIN_DIR / "subfleet-codex") in cp.stdout
     assert "gpt-5.6-sol" in cp.stdout
     assert "-e ultra" in cp.stdout
     assert '"class": "build"' in cp.stderr
-    decisions = state_home / "carpool" / "decisions.jsonl"
+    decisions = state_home / "subfleet" / "decisions.jsonl"
     records = [json.loads(line) for line in decisions.read_text().splitlines()]
     assert records[-1]["model"] == "sol"
     assert records[-1]["lane/home"] == codex_home

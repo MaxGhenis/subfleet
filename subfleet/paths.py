@@ -44,7 +44,7 @@ def codex_homes() -> list[Path]:
 
 def app_codex_home() -> Path:
     """Observed desktop-app home; this path is never a dispatch lane."""
-    return config.path("codex_app_home", "CARPOOL_CODEX_APP_HOME", HOME / ".codex")
+    return config.path("codex_app_home", "SUBFLEET_CODEX_APP_HOME", HOME / ".codex")
 
 
 def primary_codex_home() -> Path:
@@ -58,23 +58,23 @@ def state_dir() -> Path:
 
 
 def claude_dir() -> Path:
-    return _env_path("CARPOOL_CLAUDE_DIR", Path.home() / ".claude")
+    return _env_path("SUBFLEET_CLAUDE_DIR", Path.home() / ".claude")
 
 
 def claude_json() -> Path:
-    return _env_path("CARPOOL_CLAUDE_JSON", Path.home() / ".claude.json")
+    return _env_path("SUBFLEET_CLAUDE_JSON", Path.home() / ".claude.json")
 
 
 def cc_mirror_log_path() -> Path:
     return config.path(
-        "mirror_log", "CARPOOL_MIRROR_LOG", state_dir() / "carpool-mirror.log"
+        "mirror_log", "SUBFLEET_MIRROR_LOG", state_dir() / "subfleet-mirror.log"
     )
 
 
 def cc_mirror_heartbeat_path() -> Path:
     return config.path(
         "mirror_heartbeat",
-        "CARPOOL_MIRROR_HEARTBEAT",
+        "SUBFLEET_MIRROR_HEARTBEAT",
         claude_dir() / "cc-mirror-state.json",
     )
 

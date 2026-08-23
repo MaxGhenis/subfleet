@@ -1,4 +1,4 @@
-"""Shared configuration and state locations for carpool.
+"""Shared configuration and state locations for subfleet.
 
 The public configuration is a single ``accounts.json`` file.  Its required
 roster keys (``accounts`` and ``enrolled``) coexist with optional toolkit
@@ -22,9 +22,17 @@ class ConfigError(ValueError):
     """Raised when a configuration file cannot safely be updated."""
 
 
+import os as _os
+
+# carpool -> subfleet rename (2026-08-23): honour the old variable names.
+for _k, _v in list(_os.environ.items()):
+    if _k.startswith("CARPOOL_") and ("SUBFLEET_" + _k[8:]) not in _os.environ:
+        _os.environ["SUBFLEET_" + _k[8:]] = _v
+
+
 def config_dir() -> Path:
-    value = os.environ.get("CARPOOL_CONFIG_DIR")
-    return Path(value).expanduser() if value else Path.home() / ".config" / "carpool"
+    value = os.environ.get("SUBFLEET_CONFIG_DIR")
+    return Path(value).expanduser() if value else Path.home() / ".config" / "subfleet"
 
 
 def accounts_path() -> Path:
@@ -62,23 +70,23 @@ def save(value: dict[str, Any]) -> None:
 
 
 def state_dir() -> Path:
-    override = os.environ.get("CARPOOL_STATE_DIR")
+    override = os.environ.get("SUBFLEET_STATE_DIR")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_STATE_HOME")
     root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return root / "carpool"
+    return root / "subfleet"
 
 
 def codex_homes_setting() -> list[Path] | None:
     """Return an explicit home list, or ``None`` for automatic discovery.
 
-    Presence of ``CARPOOL_CODEX_HOMES`` is significant: an empty value is an
+    Presence of ``SUBFLEET_CODEX_HOMES`` is significant: an empty value is an
     explicit empty list and prevents accidental inspection of real homes in
     isolated environments.
     """
-    if "CARPOOL_CODEX_HOMES" in os.environ:
-        raw = os.environ["CARPOOL_CODEX_HOMES"]
+    if "SUBFLEET_CODEX_HOMES" in os.environ:
+        raw = os.environ["SUBFLEET_CODEX_HOMES"]
         return [Path(item).expanduser() for item in raw.split(os.pathsep) if item]
     try:
         document = load(strict=True)
@@ -94,8 +102,8 @@ def codex_homes_setting() -> list[Path] | None:
 
 
 def secret_name_prefix() -> str:
-    if "CARPOOL_SECRET_NAME_PREFIX" in os.environ:
-        return os.environ["CARPOOL_SECRET_NAME_PREFIX"]
+    if "SUBFLEET_SECRET_NAME_PREFIX" in os.environ:
+        return os.environ["SUBFLEET_SECRET_NAME_PREFIX"]
     value = load().get("secret_name_prefix", DEFAULT_SECRET_NAME_PREFIX)
     return value if isinstance(value, str) else DEFAULT_SECRET_NAME_PREFIX
 
@@ -111,9 +119,9 @@ def secret_name_for(email: str, *, require_enrolled: bool = False) -> str | None
 
 
 _COMMAND_ENV = {
-    "notify_cmd": "CARPOOL_NOTIFY_CMD",
-    "secret_store_cmd": "CARPOOL_SECRET_STORE_CMD",
-    "mirror_restart_cmd": "CARPOOL_MIRROR_RESTART_CMD",
+    "notify_cmd": "SUBFLEET_NOTIFY_CMD",
+    "secret_store_cmd": "SUBFLEET_SECRET_STORE_CMD",
+    "mirror_restart_cmd": "SUBFLEET_MIRROR_RESTART_CMD",
 }
 
 
@@ -127,7 +135,7 @@ def path(key: str, env_name: str, default: Path) -> Path:
 
 def mirror_job_label() -> str | None:
     """Optional scheduler job identifier used only as an extra health signal."""
-    raw = os.environ.get("CARPOOL_MIRROR_JOB_LABEL")
+    raw = os.environ.get("SUBFLEET_MIRROR_JOB_LABEL")
     if raw is None:
         raw = load().get("mirror_job_label")
     return raw.strip() if isinstance(raw, str) and raw.strip() else None

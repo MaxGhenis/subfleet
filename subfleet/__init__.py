@@ -1,4 +1,4 @@
-"""carpool — cross-account usage/quota + auth-stability monitor.
+"""subfleet — cross-account usage/quota + auth-stability monitor.
 
 Covers multiple Codex CODEX_HOME lanes (distinct ChatGPT accounts) and Claude
 Code subscription lanes. It makes invisible quota and authentication state

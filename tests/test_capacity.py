@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from carpool import capacity, config, paths
+from subfleet import capacity, config, paths
 
 
 NOW = datetime(2026, 7, 22, 16, 0, tzinfo=timezone.utc)
@@ -387,7 +387,7 @@ def test_capacity_dispatch_handicaps_app_shadowed_codex_account(
             }
         )
     )
-    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(app))
+    monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(app))
     live = {
         "codex": [
             {

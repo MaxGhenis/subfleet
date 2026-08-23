@@ -7,21 +7,21 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     """Keep every test away from the operator's config, state, and accounts."""
-    monkeypatch.setenv("CARPOOL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SUBFLEET_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(tmp_path / "home" / ".codex"))
+    monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(tmp_path / "home" / ".codex"))
     for name in (
-        "CARPOOL_STATE_DIR",
-        "CARPOOL_CLAUDE_ACCOUNTS",
-        "CARPOOL_NOTIFY",
-        "CARPOOL_CODEX_HOMES",
+        "SUBFLEET_STATE_DIR",
+        "SUBFLEET_CLAUDE_ACCOUNTS",
+        "SUBFLEET_NOTIFY",
+        "SUBFLEET_CODEX_HOMES",
         "DELEGATE_STATE_DIR",
         "DELEGATE_ACCOUNTS_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
 
-    from carpool import config
+    from subfleet import config
 
     config.save({"accounts": [], "enrolled": {}, "codex_homes": []})
 
@@ -74,8 +74,8 @@ def codex_home_factory(tmp_path):
 
 @pytest.fixture
 def env_paths(tmp_path, monkeypatch):
-    """Point every carpool path at tmp dirs."""
-    from carpool import config
+    """Point every subfleet path at tmp dirs."""
+    from subfleet import config
 
     state = config.state_dir()
     claude_dir = tmp_path / "dot-claude"
@@ -101,8 +101,8 @@ def env_paths(tmp_path, monkeypatch):
         f'printf "%s\\n" "$payload" >> "{notify_log}"\n'
     )
     notify.chmod(0o755)
-    monkeypatch.setenv("CARPOOL_CLAUDE_DIR", str(claude_dir))
-    monkeypatch.setenv("CARPOOL_CLAUDE_JSON", str(claude_json))
+    monkeypatch.setenv("SUBFLEET_CLAUDE_DIR", str(claude_dir))
+    monkeypatch.setenv("SUBFLEET_CLAUDE_JSON", str(claude_json))
     config.save(
         {
             "accounts": [],

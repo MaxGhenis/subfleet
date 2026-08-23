@@ -7,7 +7,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from carpool import cli, paths, run_ledger
+from subfleet import cli, paths, run_ledger
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -49,7 +49,7 @@ def test_record_run_copies_artifacts_and_finalizes_all_metadata(
     transcript = claude_dir / "projects" / "project" / "session-1.jsonl"
     transcript.parent.mkdir(parents=True)
     transcript.write_text('{"type":"assistant"}\n')
-    monkeypatch.setenv("CARPOOL_CLAUDE_DIR", str(claude_dir))
+    monkeypatch.setenv("SUBFLEET_CLAUDE_DIR", str(claude_dir))
 
     run_id = run_ledger.start_run(
         family="claude",

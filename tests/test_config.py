@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from carpool import config, paths, secret_store
+from subfleet import config, paths, secret_store
 
 
 BASE = {"accounts": [], "enrolled": {}}
@@ -14,17 +14,17 @@ class TestConfigPaths:
     def test_env_config_and_xdg_state_dirs(self, tmp_path):
         assert config.config_dir() == tmp_path / "config"
         assert config.accounts_path() == tmp_path / "config" / "accounts.json"
-        assert config.state_dir() == tmp_path / "xdg-state" / "carpool"
+        assert config.state_dir() == tmp_path / "xdg-state" / "subfleet"
 
     def test_default_dirs_follow_home(self, tmp_path, monkeypatch):
         home = tmp_path / "clean-home"
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.delenv("CARPOOL_CONFIG_DIR")
+        monkeypatch.delenv("SUBFLEET_CONFIG_DIR")
         monkeypatch.delenv("XDG_STATE_HOME")
 
-        assert config.config_dir() == home / ".config" / "carpool"
-        assert config.accounts_path() == home / ".config" / "carpool" / "accounts.json"
-        assert config.state_dir() == home / ".local" / "state" / "carpool"
+        assert config.config_dir() == home / ".config" / "subfleet"
+        assert config.accounts_path() == home / ".config" / "subfleet" / "accounts.json"
+        assert config.state_dir() == home / ".local" / "state" / "subfleet"
 
     def test_paths_module_delegates_shared_state(self):
         assert paths.state_dir() == config.state_dir()
@@ -37,7 +37,7 @@ class TestConfigPaths:
 class TestConfigIO:
     def test_save_round_trip_and_creates_parent(self, tmp_path, monkeypatch):
         target = tmp_path / "nested" / "config"
-        monkeypatch.setenv("CARPOOL_CONFIG_DIR", str(target))
+        monkeypatch.setenv("SUBFLEET_CONFIG_DIR", str(target))
         data = {
             "accounts": ["alpha@example.com"],
             "enrolled": {"alpha@example.com": "lane-alpha"},
@@ -82,7 +82,7 @@ class TestCodexHomes:
     def test_default_discovery_globs_all_numeric_suffixes(self, tmp_path, monkeypatch):
         home = tmp_path / "discovery-home"
         monkeypatch.setattr(paths, "HOME", home)
-        monkeypatch.setenv("CARPOOL_CODEX_APP_HOME", str(home / ".codex"))
+        monkeypatch.setenv("SUBFLEET_CODEX_APP_HOME", str(home / ".codex"))
         home.mkdir()
         for name in (".codex", ".codex-10", ".codex-2"):
             (home / name).mkdir()
@@ -214,7 +214,7 @@ class TestDefaultSecretStore:
 
 class TestSecretCLI:
     def test_get_for_account_prints_only_secret(self, monkeypatch, capsys):
-        from carpool import cli
+        from subfleet import cli
 
         config.save(
             {
@@ -231,7 +231,7 @@ class TestSecretCLI:
         assert captured.err == ""
 
     def test_get_for_unenrolled_account_fails_closed(self, monkeypatch, capsys):
-        from carpool import cli
+        from subfleet import cli
 
         config.save({"accounts": ["beta@example.com"], "enrolled": {}, "codex_homes": []})
         monkeypatch.setattr(secret_store, "get", lambda name: pytest.fail("secret store should not run"))

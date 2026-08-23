@@ -16,11 +16,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HOOK = ROOT / "bin" / "carpool-guard-hook"
-GUARD = ROOT / "bin" / "carpool-guard"
+HOOK = ROOT / "bin" / "subfleet-guard-hook"
+GUARD = ROOT / "bin" / "subfleet-guard"
 KEY = "/<session-flags>/config.toml:pre_tool_use:0:0"
 MATCHER = "Bash"
-STATUS = "carpool safety guard"
+STATUS = "subfleet safety guard"
 PROCESS_TIMEOUT = 20
 
 
@@ -238,7 +238,7 @@ def test_local_default_branch_policy(git_repositories):
 def test_denial_logging_is_opt_in_and_fail_safe(tmp_path):
     log_path = tmp_path / "denials.log"
     env = os.environ.copy()
-    env["CARPOOL_GUARD_LOG"] = str(log_path)
+    env["SUBFLEET_GUARD_LOG"] = str(log_path)
     completed = run(
         [HOOK],
         stdin=event("find / -name result", tmp_path),
@@ -247,7 +247,7 @@ def test_denial_logging_is_opt_in_and_fail_safe(tmp_path):
     assert deny_reason(completed).startswith("[unscoped-search]")
     assert "find / -name result" in log_path.read_text()
 
-    env["CARPOOL_GUARD_LOG"] = str(tmp_path / "missing" / "directory")
+    env["SUBFLEET_GUARD_LOG"] = str(tmp_path / "missing" / "directory")
     completed = run(
         [HOOK],
         stdin=event("find / -name result", tmp_path),
@@ -372,14 +372,14 @@ if [ "${1:-}" = "app-server" ]; then
   [ -f "$CODEX_HOME/config.toml" ] && config=yes
   [ -f "$CODEX_HOME/hooks.json" ] && hooks=yes
   [ -e "$CODEX_HOME/auth.json" ] && auth=yes
-  if [ -n "${CARPOOL_TEST_REPORT:-}" ]; then
-    printf 'config=%s hooks=%s auth=%s\n' "$config" "$hooks" "$auth" >> "$CARPOOL_TEST_REPORT"
+  if [ -n "${SUBFLEET_TEST_REPORT:-}" ]; then
+    printf 'config=%s hooks=%s auth=%s\n' "$config" "$hooks" "$auth" >> "$SUBFLEET_TEST_REPORT"
   fi
   while IFS= read -r request; do
     case "$request" in
       *'"id":2'*)
         printf '{"jsonrpc":"2.0","id":2,"result":{"data":[{"warnings":[],"errors":[],"hooks":[{"key":"%s","enabled":true,"trustStatus":"%s","currentHash":"%s"}]}]}}\n' \
-          "$CARPOOL_TEST_KEY" "${CARPOOL_TEST_TRUST:-trusted}" "$CARPOOL_TEST_HASH"
+          "$SUBFLEET_TEST_KEY" "${SUBFLEET_TEST_TRUST:-trusted}" "$SUBFLEET_TEST_HASH"
         exit 0
         ;;
     esac
@@ -395,11 +395,11 @@ def preflight_env(tmp_path, stub):
     env = os.environ.copy()
     env.update(
         {
-            "CARPOOL_GUARD_CACHE": str(tmp_path / "guard-cache"),
-            "CARPOOL_TEST_HASH": expected_hash(HOOK),
-            "CARPOOL_TEST_KEY": KEY,
-            "CARPOOL_TEST_REPORT": str(tmp_path / "stub-report"),
-            "CARPOOL_GUARD_PREFLIGHT_TIMEOUT": "3",
+            "SUBFLEET_GUARD_CACHE": str(tmp_path / "guard-cache"),
+            "SUBFLEET_TEST_HASH": expected_hash(HOOK),
+            "SUBFLEET_TEST_KEY": KEY,
+            "SUBFLEET_TEST_REPORT": str(tmp_path / "stub-report"),
+            "SUBFLEET_GUARD_PREFLIGHT_TIMEOUT": "3",
         }
     )
     return env
@@ -432,9 +432,9 @@ def test_preflight_uses_scratch_home_and_cache(tmp_path):
     assert first.returncode == 0, first.stderr
     assert first.stdout.startswith("preflight: ok (codex-cli guard-test")
     assert auth.read_text() == "credential-sentinel\n"
-    report = Path(env["CARPOOL_TEST_REPORT"])
+    report = Path(env["SUBFLEET_TEST_REPORT"])
     assert report.read_text().splitlines() == ["config=yes hooks=yes auth=no"]
-    assert len(list(Path(env["CARPOOL_GUARD_CACHE"]).glob("ok-*"))) == 1
+    assert len(list(Path(env["SUBFLEET_GUARD_CACHE"]).glob("ok-*"))) == 1
 
     second = run(command, env=env)
     assert second.returncode == 0, second.stderr
@@ -459,7 +459,7 @@ def test_preflight_rejects_untrusted_hook_and_no_cache_writes_nothing(tmp_path):
     workdir = tmp_path / "work"
     workdir.mkdir()
     env = preflight_env(tmp_path, stub)
-    env["CARPOOL_TEST_TRUST"] = "modified"
+    env["SUBFLEET_TEST_TRUST"] = "modified"
     completed = run(
         [
             GUARD,
@@ -476,7 +476,7 @@ def test_preflight_rejects_untrusted_hook_and_no_cache_writes_nothing(tmp_path):
     )
     assert completed.returncode == 1
     assert "preflight: FAILED - hook enabled=true trustStatus=modified" in completed.stderr
-    assert not Path(env["CARPOOL_GUARD_CACHE"]).exists()
+    assert not Path(env["SUBFLEET_GUARD_CACHE"]).exists()
 
 
 def test_preflight_validates_paths_before_launch(tmp_path):

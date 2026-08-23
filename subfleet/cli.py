@@ -1,19 +1,19 @@
-"""carpool CLI — multi-account AI capacity and dispatch, one front door.
+"""subfleet CLI — multi-account AI capacity and dispatch, one front door.
 
-  carpool                       # human table (live probes)
-  carpool status --json|--cached
-  carpool capacity [--json]
-  carpool pick codex            # best dispatchable CODEX_HOME
-  carpool pick claude           # best enrolled Claude lane
-  carpool run ...                # capacity-aware delegate router
-  carpool codex ...              # hardened Codex runner
-  carpool claude ...             # hardened Claude runner
-  carpool login codex <N|app>    # stage an interactive Codex re-login
-  carpool enroll <email>
-  carpool mirror [--quiet]       # desktop session mirror pass
-  carpool errors --hours 48
-  carpool watch [--dry-run]
-  carpool brief                  # compact Markdown status section
+  subfleet                       # human table (live probes)
+  subfleet status --json|--cached
+  subfleet capacity [--json]
+  subfleet pick codex            # best dispatchable CODEX_HOME
+  subfleet pick claude           # best enrolled Claude lane
+  subfleet run ...                # capacity-aware delegate router
+  subfleet codex ...              # hardened Codex runner
+  subfleet claude ...             # hardened Claude runner
+  subfleet login codex <N|app>    # stage an interactive Codex re-login
+  subfleet enroll <email>
+  subfleet mirror [--quiet]       # desktop session mirror pass
+  subfleet errors --hours 48
+  subfleet watch [--dry-run]
+  subfleet brief                  # compact Markdown status section
 """
 
 import argparse
@@ -51,7 +51,7 @@ def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
         snap = load_json(paths.snapshot_path())
         if snap:
             return snap
-        print("carpool: no cached snapshot yet; probing live", file=sys.stderr)
+        print("subfleet: no cached snapshot yet; probing live", file=sys.stderr)
     # Small error window interactively; the watchdog covers the long window.
     return snapshot.build(live=True, timeout=live_timeout, errors_hours=6)
 
@@ -147,7 +147,7 @@ def _reset_from_text(text: str) -> str | None:
 
 
 def cmd_lane_usage(args) -> int:
-    """Internal, best-effort bridge used by ``carpool claude``."""
+    """Internal, best-effort bridge used by ``subfleet claude``."""
     try:
         if args.action == "record":
             capacity.append_lane_usage(
@@ -170,7 +170,7 @@ def cmd_lane_usage(args) -> int:
         return 0
     except Exception as exc:
         # Accounting must never turn a completed agent run into a failure.
-        print(f"carpool lane-usage: accounting skipped: {exc}", file=sys.stderr)
+        print(f"subfleet lane-usage: accounting skipped: {exc}", file=sys.stderr)
         return 0
 
 
@@ -206,7 +206,7 @@ def cmd_pick(args) -> int:
     if not ranked:
         earliest = snap["codex"]["fleet"].get("earliest_reset")
         print(
-            "carpool pick: no dispatchable codex home"
+            "subfleet pick: no dispatchable codex home"
             + (f" (earliest 5h reset {earliest})" if earliest else ""),
             file=sys.stderr,
         )
@@ -273,14 +273,14 @@ def cmd_claude_pick(args) -> int:
     if not ranked:
         if enrolled == 0:
             print(
-                "carpool pick claude: no lanes enrolled — enroll with: "
-                "claude setup-token, then carpool enroll <email>",
+                "subfleet pick claude: no lanes enrolled — enroll with: "
+                "claude setup-token, then subfleet enroll <email>",
                 file=sys.stderr,
             )
         else:
             blocked = "; ".join(f"{lane['email']} {lane['verdict']}" for lane in excluded)
             print(
-                "carpool pick claude: no dispatchable claude lane"
+                "subfleet pick claude: no dispatchable claude lane"
                 + (f" (earliest reset {earliest_reset})" if earliest_reset else "")
                 + (f" — {blocked}" if blocked else ""),
                 file=sys.stderr,
@@ -375,16 +375,16 @@ def cmd_enroll(args) -> int:
     try:
         cfg = config.load(strict=True)
     except config.ConfigError as exc:
-        print(f"carpool enroll: {exc}", file=sys.stderr)
+        print(f"subfleet enroll: {exc}", file=sys.stderr)
         return 2
     accounts = cfg.get("accounts", [])
     enrolled = cfg.get("enrolled")
     if not isinstance(accounts, list) or (enrolled is not None and not isinstance(enrolled, dict)):
-        print(f"carpool enroll: invalid roster schema in {config.accounts_path()}", file=sys.stderr)
+        print(f"subfleet enroll: invalid roster schema in {config.accounts_path()}", file=sys.stderr)
         return 2
     roster = sorted(account for account in accounts if isinstance(account, str) and "@" in account)
     if email not in roster:
-        print(f"carpool enroll: {email} is not in the roster ({len(roster)} accounts); "
+        print(f"subfleet enroll: {email} is not in the roster ({len(roster)} accounts); "
               f"add it to {claude.roster_config_path()} first", file=sys.stderr)
         return 2
     if sys.stdin.isatty():
@@ -392,23 +392,23 @@ def cmd_enroll(args) -> int:
     else:
         token = sys.stdin.read().strip()
     if not token:
-        print("carpool enroll: empty token", file=sys.stderr)
+        print("subfleet enroll: empty token", file=sys.stderr)
         return 2
     probe = claude.probe_oauth_usage(token)
     probe_status = probe.get("status")
     if probe_status not in {"ok", "http-403", "rate-limited"}:
-        print(f"carpool enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
+        print(f"subfleet enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
               "not storing. Is it fresh, and for the right account?", file=sys.stderr)
         return 1
     secret = config.secret_name_for(email)
     if not secret_store.set(secret, token):
-        print("carpool enroll: secret store failed", file=sys.stderr)
+        print("subfleet enroll: secret store failed", file=sys.stderr)
         return 1
     cfg.setdefault("enrolled", {})[email] = secret
     config.save(cfg)
     if not capacity.clear_lane_cooldown(email):
         print(
-            f"carpool enroll: warning: could not clear prior cooldown for {email}",
+            f"subfleet enroll: warning: could not clear prior cooldown for {email}",
             file=sys.stderr,
         )
     extracted = {k: probe.get(k) for k in ("five_hour", "seven_day") if probe.get(k)}
@@ -425,13 +425,13 @@ def cmd_secret(args) -> int:
     name = config.secret_name_for(args.email, require_enrolled=True)
     if name is None:
         print(
-            f"carpool secret: {args.email} is not enrolled in {config.accounts_path()}",
+            f"subfleet secret: {args.email} is not enrolled in {config.accounts_path()}",
             file=sys.stderr,
         )
         return 1
     value = secret_store.get(name)
     if value is None:
-        print(f"carpool secret: item unavailable for {args.email}", file=sys.stderr)
+        print(f"subfleet secret: item unavailable for {args.email}", file=sys.stderr)
         return 1
     print(value)
     return 0
@@ -441,7 +441,7 @@ def cmd_codex_binary(_args) -> int:
     """Internal bridge for shell entrypoints that cannot assume a rich PATH."""
     binary = codex._codex_binary()
     if not binary:
-        print("carpool: real Codex binary not found", file=sys.stderr)
+        print("subfleet: real Codex binary not found", file=sys.stderr)
         return 1
     print(binary)
     return 0
@@ -477,7 +477,7 @@ def cmd_record_run(args) -> int:
                     decision_json=(
                         args.decision_json
                         if args.decision_json is not None
-                        else os.environ.get("CARPOOL_RUN_DECISION_JSON")
+                        else os.environ.get("SUBFLEET_RUN_DECISION_JSON")
                     ),
                     started=args.started,
                 )
@@ -500,7 +500,7 @@ def cmd_record_run(args) -> int:
                 finished=args.finished,
             )
     except (OSError, TypeError, ValueError) as exc:
-        print(f"carpool _record-run: {exc}", file=sys.stderr)
+        print(f"subfleet _record-run: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -510,7 +510,7 @@ def cmd_runs(args) -> int:
         try:
             run_dir, meta = run_ledger.load_run(args.id)
         except (OSError, ValueError) as exc:
-            print(f"carpool runs show: {exc}", file=sys.stderr)
+            print(f"subfleet runs show: {exc}", file=sys.stderr)
             return 1
         print(json.dumps(strip_private(meta), indent=1))
         artifacts = [("out.md", run_dir / "out.md")]
@@ -527,7 +527,7 @@ def cmd_runs(args) -> int:
                 print()
         return 0
     if args.last < 0:
-        print("carpool runs: --last must be non-negative", file=sys.stderr)
+        print("subfleet runs: --last must be non-negative", file=sys.stderr)
         return 2
     rows = run_ledger.list_runs(args.last)
     print(json.dumps(rows, indent=1) if args.json else run_ledger.format_runs(rows))
@@ -544,13 +544,13 @@ def _exec_tool(name: str, rest: list[str]) -> int:
 
     path = _bin(name)
     if not os.access(path, os.X_OK):
-        print(f"carpool: tool missing or not executable: {path}", file=sys.stderr)
+        print(f"subfleet: tool missing or not executable: {path}", file=sys.stderr)
         return 2
     os.execv(path, [path, *rest])
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="carpool", description=__doc__,
+    parser = argparse.ArgumentParser(prog="subfleet", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
 
@@ -667,9 +667,9 @@ def main(argv=None) -> int:
             return delegate.main(rest)
         return _exec_tool(
             {
-                "codex": "carpool-codex",
-                "claude": "carpool-claude",
-                "mirror": "carpool-mirror",
+                "codex": "subfleet-codex",
+                "claude": "subfleet-claude",
+                "mirror": "subfleet-mirror",
             }[argv[0]],
             rest,
         )

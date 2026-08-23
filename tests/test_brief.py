@@ -1,4 +1,4 @@
-from carpool import render
+from subfleet import render
 
 
 NOW = "2026-08-22T12:00:00+00:00"
@@ -83,7 +83,7 @@ def test_brief_reports_codex_auth_problems_and_duplicates():
     assert "/tmp/home/.codex-3 no-auth" in output
     assert "DUPLICATE account bindings" in output
     assert "revocation trap" in output
-    assert "`carpool login codex <N|app>`" in output
+    assert "`subfleet login codex <N|app>`" in output
 
 
 def test_brief_prefers_active_limit_over_usage():

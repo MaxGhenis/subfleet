@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""carpool mirror — make every Claude account share one combined Code sidebar.
+"""subfleet mirror — make every Claude account share one combined Code sidebar.
 
 The Claude desktop app stores one small JSON "index" file per Claude Code session at:
 
@@ -56,15 +56,15 @@ session names persist across accounts even if no index file ever caught the
 rename. Transcript tails are re-read only when the transcript mtime moves.
 
 Usage:
-    carpool mirror            # sync now: add missing + repair stale-empty openable sessions
-    carpool mirror --list     # show per-account openable/dead counts, do nothing
-    carpool mirror --dry-run  # show what would change, change nothing
-    carpool mirror --prune    # also remove dead-session copies (app usually does this itself)
-    carpool mirror --quiet    # one-line summary (launchd)
-    carpool mirror --dead-home <orgUuid>   # account to keep dead sessions in
-    carpool mirror --no-restore            # skip reviving from the transcript archive
-    carpool mirror --archive <glob>        # override transcript-archive location
-    carpool mirror --no-flag-sync          # skip isArchived/title propagation
+    subfleet mirror            # sync now: add missing + repair stale-empty openable sessions
+    subfleet mirror --list     # show per-account openable/dead counts, do nothing
+    subfleet mirror --dry-run  # show what would change, change nothing
+    subfleet mirror --prune    # also remove dead-session copies (app usually does this itself)
+    subfleet mirror --quiet    # one-line summary (launchd)
+    subfleet mirror --dead-home <orgUuid>   # account to keep dead sessions in
+    subfleet mirror --no-restore            # skip reviving from the transcript archive
+    subfleet mirror --archive <glob>        # override transcript-archive location
+    subfleet mirror --no-flag-sync          # skip isArchived/title propagation
 """
 
 import argparse
@@ -261,7 +261,7 @@ def restore_dead(folder_files, stems, pattern, dry_run):
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="carpool mirror",
+        prog="subfleet mirror",
         description="Unify Claude Code sidebars across accounts.",
     )
     ap.add_argument("--list", action="store_true")
@@ -281,7 +281,7 @@ def main():
     ap.add_argument("--archive", default=None, metavar="GLOB",
                     help="recursive glob for archived transcripts (default: \"archive\" "
                          "in ~/.claude/cc-mirror.json; no archive -> no revive step)")
-    ap.add_argument("--version", action="version", version="carpool mirror %s" % __version__)
+    ap.add_argument("--version", action="version", version="subfleet mirror %s" % __version__)
     args = ap.parse_args()
     cfg = load_config()
     if args.dead_home is None:
@@ -545,7 +545,7 @@ def main():
                f"flag-synced {flag_synced}, retitled {retitled}, t-retitled {t_retitled}")
     if args.quiet:
         if added or fixed or pruned or revived or flag_synced or retitled or t_retitled:
-            print(f"carpool mirror: {summary}")
+            print(f"subfleet mirror: {summary}")
     else:
         print(f"\n{(verb + ' ') if verb else ''}{'add/repair/prune' if verb else 'Done'}: {summary}\n")
         for acct, org, path in folders:

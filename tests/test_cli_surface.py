@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from carpool import cli, login
+from subfleet import cli, login
 
 
 def test_help_exposes_unified_subcommand_surface(capsys):
@@ -57,7 +57,7 @@ def test_bare_and_status_flags_route_to_status(monkeypatch):
 
 
 def test_run_routes_directly_to_delegate(monkeypatch):
-    from carpool import delegate
+    from subfleet import delegate
 
     seen = []
     monkeypatch.setattr(delegate, "main", lambda argv: seen.extend(argv) or 0)
@@ -69,9 +69,9 @@ def test_run_routes_directly_to_delegate(monkeypatch):
 @pytest.mark.parametrize(
     ("command", "script"),
     [
-        ("codex", "carpool-codex"),
-        ("claude", "carpool-claude"),
-        ("mirror", "carpool-mirror"),
+        ("codex", "subfleet-codex"),
+        ("claude", "subfleet-claude"),
+        ("mirror", "subfleet-mirror"),
     ],
 )
 def test_pass_through_commands_exec_sibling_scripts(monkeypatch, command, script):

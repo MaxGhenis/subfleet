@@ -5,8 +5,8 @@ from threading import Event
 
 import pytest
 
-from carpool import paths, watchdog
-from carpool.util import load_json, now_local
+from subfleet import paths, watchdog
+from subfleet.util import load_json, now_local
 
 from conftest import wham_ok
 from test_pick import entry

@@ -1,8 +1,8 @@
 from datetime import timedelta
 
-from carpool import run_ledger
-from carpool.snapshot import rank_for_dispatch
-from carpool.util import now_local
+from subfleet import run_ledger
+from subfleet.snapshot import rank_for_dispatch
+from subfleet.util import now_local
 
 
 def entry(home, used, weekly=20, verdict="ok", account="a", primary_home=False,

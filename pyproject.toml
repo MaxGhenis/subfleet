@@ -1,5 +1,5 @@
 [project]
-name = "carpool"
+name = "subfleet"
 version = "0.1.0"
 description = "Multi-account AI subscription monitoring and hardened task dispatch"
 readme = "README.md"

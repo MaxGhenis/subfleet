@@ -1,9 +1,10 @@
-# carpool
+# subfleet
 
-Formerly `ai-lanes`.
+A fleet of subs. Formerly `ai-lanes`, then `carpool` (renamed 2026-08-23;
+`CARPOOL_*` environment variables are still honoured).
 
-carpool runs agentic work across several Claude Code and Codex subscriptions
-without repeatedly replacing one login. Each subscription gets a lane, the
+subfleet runs agentic work across several Claude Code and Codex subscriptions
+without repeatedly replacing one login — the subs operate under the surface. Each subscription gets a lane, the
 router selects a lane with usable capacity, and the hardened runners can move
 to another lane when a provider reports a limit.
 
@@ -16,13 +17,13 @@ portable secret-store command can be configured.
 
 ```bash
 uv sync
-mkdir -p ~/.config/carpool
-cp accounts.example.json ~/.config/carpool/accounts.json
+mkdir -p ~/.config/subfleet
+cp accounts.example.json ~/.config/subfleet/accounts.json
 export PATH="$PWD/bin:$PATH"
-carpool status
+subfleet status
 ```
 
-Edit `~/.config/carpool/accounts.json` before enrolling or dispatching. The
+Edit `~/.config/subfleet/accounts.json` before enrolling or dispatching. The
 committed [accounts.example.json](accounts.example.json) contains only reserved
 example addresses and documents the supported public settings.
 
@@ -30,10 +31,10 @@ example addresses and documents the supported public settings.
 
 Codex keeps one login per home directory:
 
-- `~/.codex` is the desktop app's home. carpool observes its account and live
+- `~/.codex` is the desktop app's home. subfleet observes its account and live
   capacity, but never treats it as a dispatch lane.
 - `~/.codex-1`, `~/.codex-2`, and so on are dispatch lanes. They are discovered
-  automatically unless `codex_homes` or `CARPOOL_CODEX_HOMES` supplies an
+  automatically unless `codex_homes` or `SUBFLEET_CODEX_HOMES` supplies an
   explicit list.
 - A numbered lane bound to the desktop app's current account is *shadowed*.
   It remains visible but receives a dispatch handicap, and the watchdog warns
@@ -43,8 +44,8 @@ Codex keeps one login per home directory:
 Log into a numbered lane or the separately observed app home with:
 
 ```bash
-carpool login codex 1
-carpool login codex app
+subfleet login codex 1
+subfleet login codex app
 ```
 
 The command starts the vendor login server in that home, opens its authorization
@@ -58,7 +59,7 @@ Claude lanes are the addresses in `accounts`, mapped to secret-store items by
 environment variable:
 
 ```bash
-claude setup-token | carpool enroll user1@example.com
+claude setup-token | subfleet enroll user1@example.com
 ```
 
 Enrollment makes a one-time validation request and accepts the authorization
@@ -71,22 +72,22 @@ ledger and learns cooldowns from actual hard-limit responses.
 
 | Command | Purpose |
 | --- | --- |
-| `carpool status [--json] [--cached]` | Show account identity, quota, authentication, shadow, and health state. With no subcommand, `status` is the default. |
-| `carpool capacity [--json]` | Normalize five-hour and weekly headroom across both providers. |
-| `carpool pick codex` | Print the best dispatchable Codex home. |
-| `carpool pick claude` | Print the best enrolled Claude address. |
-| `carpool run` | Classify a task, select a provider and lane, and invoke a hardened runner. |
-| `carpool codex` | Run hardened `codex exec`; `-H` is optional and omitted lanes are selected automatically. |
-| `carpool claude` | Run hardened headless Claude Code with `-A` auto-selection or `-a EMAIL` pinning. |
-| `carpool login codex N\|app` | Perform the Codex re-login ritual for one numbered lane or the app home. |
-| `carpool enroll EMAIL` | Read a Claude setup token from stdin and store it through the secret-store abstraction. |
-| `carpool mirror` | Run one Claude desktop-session mirror pass; accepts `--list`, `--dry-run`, `--prune`, and the mirror's other options. |
-| `carpool errors` | Show recently observed provider limit and authentication errors. |
-| `carpool watch [--dry-run]` | Take one snapshot, evaluate health transitions, and send or print alerts. |
-| `carpool brief` | Print a compact Markdown capacity section. |
-| `carpool runs` | Inspect the durable prompt/output/error ledger; `runs show ID` displays one run. |
+| `subfleet status [--json] [--cached]` | Show account identity, quota, authentication, shadow, and health state. With no subcommand, `status` is the default. |
+| `subfleet capacity [--json]` | Normalize five-hour and weekly headroom across both providers. |
+| `subfleet pick codex` | Print the best dispatchable Codex home. |
+| `subfleet pick claude` | Print the best enrolled Claude address. |
+| `subfleet run` | Classify a task, select a provider and lane, and invoke a hardened runner. |
+| `subfleet codex` | Run hardened `codex exec`; `-H` is optional and omitted lanes are selected automatically. |
+| `subfleet claude` | Run hardened headless Claude Code with `-A` auto-selection or `-a EMAIL` pinning. |
+| `subfleet login codex N\|app` | Perform the Codex re-login ritual for one numbered lane or the app home. |
+| `subfleet enroll EMAIL` | Read a Claude setup token from stdin and store it through the secret-store abstraction. |
+| `subfleet mirror` | Run one Claude desktop-session mirror pass; accepts `--list`, `--dry-run`, `--prune`, and the mirror's other options. |
+| `subfleet errors` | Show recently observed provider limit and authentication errors. |
+| `subfleet watch [--dry-run]` | Take one snapshot, evaluate health transitions, and send or print alerts. |
+| `subfleet brief` | Print a compact Markdown capacity section. |
+| `subfleet runs` | Inspect the durable prompt/output/error ledger; `runs show ID` displays one run. |
 
-Use `carpool COMMAND --help` for monitor and router options. The pass-through
+Use `subfleet COMMAND --help` for monitor and router options. The pass-through
 runners intentionally retain their concise shell usage strings.
 
 ## Dispatch
@@ -94,8 +95,8 @@ runners intentionally retain their concise shell usage strings.
 The router accepts prompt text or `-p PROMPTFILE` and can explain its decision:
 
 ```bash
-carpool run --why -C /path/to/project -o result.md "Fix the failing retry test"
-carpool run --dry-run -p task.md
+subfleet run --why -C /path/to/project -o result.md "Fix the failing retry test"
+subfleet run --dry-run -p task.md
 ```
 
 Its transparent pattern rules classify prose and final-judgment work, reviews,
@@ -108,9 +109,9 @@ task-class, sandbox, detached-run, and salvage-branch overrides.
 The provider runners are also available directly:
 
 ```bash
-carpool codex -m MODEL_NAME -C "$PWD" -p task.md -o result.md
-carpool claude -A -m MODEL_NAME -C "$PWD" -p task.md -o result.md
-carpool claude -a user1@example.com -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+subfleet codex -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+subfleet claude -A -m MODEL_NAME -C "$PWD" -p task.md -o result.md
+subfleet claude -a user1@example.com -m MODEL_NAME -C "$PWD" -p task.md -o result.md
 ```
 
 An unpinned Codex run auto-picks a home and re-picks after a mid-run usage
@@ -123,14 +124,14 @@ the real index. Claude additionally records lane usage and writes a
 
 Adding this repository's `bin` directory before the vendor Codex binary also
 enables the `bin/codex` shim. It selects a lane for headless `exec`, `e`, and
-`review` calls when `CODEX_HOME` is unset. Set `CARPOOL_NO_AUTOPICK=1` to opt
-out; interactive commands and explicit homes pass through unchanged. carpool
+`review` calls when `CODEX_HOME` is unset. Set `SUBFLEET_NO_AUTOPICK=1` to opt
+out; interactive commands and explicit homes pass through unchanged. subfleet
 resolves the real Codex executable without depending on scheduler `PATH`.
 
 ## Monitoring and repair
 
-`carpool watch` is a single pass suitable for cron or another scheduler. It
-persists snapshots and transition state under `~/.local/state/carpool` by
+`subfleet watch` is a single pass suitable for cron or another scheduler. It
+persists snapshots and transition state under `~/.local/state/subfleet` by
 default. Alerts cover exhausted or unauthenticated lanes, free-plan accounts,
 new app shadows, fleet exhaustion, and mirror health without repeating an
 unchanged condition every pass.
@@ -145,12 +146,12 @@ For a Codex lane whose live quota request returns the narrow expired-token
 signature, the watchdog may ask the vendor CLI to refresh its own credentials
 and then re-probe. Repair is guarded by a renewable lock lease, bounded by a
 timeout, disabled during dry runs, and latched after definitive revocation
-until a new login changes the authentication file. carpool never writes a
+until a new login changes the authentication file. subfleet never writes a
 Codex access token itself.
 
 ## Configuration
 
-The default configuration file is `~/.config/carpool/accounts.json`. Important
+The default configuration file is `~/.config/subfleet/accounts.json`. Important
 keys are:
 
 - `accounts` and `enrolled`: the Claude roster and its secret item names.
@@ -159,7 +160,7 @@ keys are:
 - `protected_account`: an optional identity fallback used only when the app
   home cannot provide its current account.
 - `secret_store_cmd`: an argv prefix implementing `get NAME`, `set NAME` with
-  the value on stdin, and `del NAME`. When unset, carpool uses macOS `security`.
+  the value on stdin, and `del NAME`. When unset, subfleet uses macOS `security`.
 - `notify_cmd`: an argv prefix receiving `SUBJECT BODY`; the complete message
   is also sent on stdin. When unset, alerts go to stderr.
 - `mirror_heartbeat`, `mirror_job_label`, and
@@ -171,23 +172,23 @@ keys are:
 Command settings may be JSON argv arrays or shell-like strings parsed into
 argv; they are never executed as shell expressions.
 
-Common environment overrides are `CARPOOL_CONFIG_DIR`, `CARPOOL_STATE_DIR`,
-`CARPOOL_CODEX_HOMES` (colon-separated on macOS/Linux),
-`CARPOOL_CODEX_APP_HOME`, `CARPOOL_CODEX_BIN`, `CARPOOL_CLAUDE_DIR`,
-`CARPOOL_CLAUDE_JSON`, `CARPOOL_SECRET_NAME_PREFIX`,
-`CARPOOL_SECRET_STORE_CMD`, `CARPOOL_NOTIFY_CMD`,
-`CARPOOL_MIRROR_HEARTBEAT`,
-`CARPOOL_MIRROR_JOB_LABEL`, `CARPOOL_MIRROR_RESTART_CMD`,
-`CARPOOL_LOGIN_BROWSER_CMD`, `CARPOOL_LOGIN_REFRESH_CMD`, and
-`CARPOOL_CODEX_GUARD=off` for an explicit one-run guard bypass.
+Common environment overrides are `SUBFLEET_CONFIG_DIR`, `SUBFLEET_STATE_DIR`,
+`SUBFLEET_CODEX_HOMES` (colon-separated on macOS/Linux),
+`SUBFLEET_CODEX_APP_HOME`, `SUBFLEET_CODEX_BIN`, `SUBFLEET_CLAUDE_DIR`,
+`SUBFLEET_CLAUDE_JSON`, `SUBFLEET_SECRET_NAME_PREFIX`,
+`SUBFLEET_SECRET_STORE_CMD`, `SUBFLEET_NOTIFY_CMD`,
+`SUBFLEET_MIRROR_HEARTBEAT`,
+`SUBFLEET_MIRROR_JOB_LABEL`, `SUBFLEET_MIRROR_RESTART_CMD`,
+`SUBFLEET_LOGIN_BROWSER_CMD`, `SUBFLEET_LOGIN_REFRESH_CMD`, and
+`SUBFLEET_CODEX_GUARD=off` for an explicit one-run guard bypass.
 
-carpool does not embed secrets or local account identifiers in repository
+subfleet does not embed secrets or local account identifiers in repository
 files. Runtime ledgers are created in the configured state directory with
 private permissions; runner output is written only to the path you request.
 
 ## Codex command guard
 
-`carpool codex` preflights a portable Codex `PreToolUse` hook before launch.
+`subfleet codex` preflights a portable Codex `PreToolUse` hook before launch.
 The hook covers four generic local-machine and Git hazards: unscoped root
 searches, decrypted keychain dumps, stash mutation in shared worktrees, and
 new local branches made from a stale local main branch. See

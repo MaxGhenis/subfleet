@@ -1,4 +1,4 @@
-"""Durable, private artifacts and live-run state for carpool dispatches."""
+"""Durable, private artifacts and live-run state for subfleet dispatches."""
 
 from __future__ import annotations
 

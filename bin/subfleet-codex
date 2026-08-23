@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# carpool codex — hardened `codex exec` dispatch.
+# subfleet codex — hardened `codex exec` dispatch.
 #
 # With no -H, the runner picks a dispatchable lane and moves to another lane
 # if the provider reports a usage limit. It also records every dispatch and
@@ -7,7 +7,7 @@
 # the worktree. See docs/guard.md for the optional command guard.
 #
 # Usage:
-#   carpool codex [-H <codex_home>] -m <model> -C <workdir> \
+#   subfleet codex [-H <codex_home>] -m <model> -C <workdir> \
 #     -p <prompt_file> -o <out_file> [-s <sandbox>] [-b <salvage_branch>] \
 #     [-R <salvage_remote>] [-r <max_retries>] [-e <reasoning_effort>]
 set -u
@@ -30,22 +30,22 @@ while getopts "H:m:C:p:o:s:b:R:r:e:" opt; do
   esac
 done
 for req in MODEL WORKDIR PROMPT_FILE OUT_FILE; do
-  [ -n "${!req}" ] || { echo "carpool codex: missing required option" >&2; exit 2; }
+  [ -n "${!req}" ] || { echo "subfleet codex: missing required option" >&2; exit 2; }
 done
 [ -f "$PROMPT_FILE" ] || {
-  echo "carpool codex: prompt file not found: $PROMPT_FILE" >&2
+  echo "subfleet codex: prompt file not found: $PROMPT_FILE" >&2
   exit 2
 }
 case "$SALVAGE_BRANCH" in
   main|master)
-    echo "carpool codex: refusing -b main|master because salvage pushes are forced; use a dedicated recovery branch" >&2
+    echo "subfleet codex: refusing -b main|master because salvage pushes are forced; use a dedicated recovery branch" >&2
     exit 2 ;;
 esac
 
 ERR_FILE="${OUT_FILE%.md}.err.log"
-ORIGINAL_OUT_FILE=${CARPOOL_RUN_ORIGINAL_OUT-$OUT_FILE}
+ORIGINAL_OUT_FILE=${SUBFLEET_RUN_ORIGINAL_OUT-$OUT_FILE}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-CARPOOL=${CARPOOL_RUN_CARPOOL:-$SCRIPT_DIR/carpool}
+SUBFLEET=${SUBFLEET_RUN_SUBFLEET:-$SCRIPT_DIR/subfleet}
 AUTO_LANE=0
 RUN_ID=""
 EXCLUDED_HOMES=()
@@ -57,13 +57,13 @@ record_run_start() {
     --lane "$CODEX_HOME_ARG" --workdir "$WORKDIR" --prompt "$PROMPT_FILE"
     --out "$OUT_FILE" --err "$ERR_FILE" --original-out "$ORIGINAL_OUT_FILE"
   )
-  [ -z "${CARPOOL_RUN_LANE_LOG:-}" ] || record_args+=(--lane-log "$CARPOOL_RUN_LANE_LOG")
-  RUN_ID=$("$CARPOOL" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+  [ -z "${SUBFLEET_RUN_LANE_LOG:-}" ] || record_args+=(--lane-log "$SUBFLEET_RUN_LANE_LOG")
+  RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
 }
 
 record_run_lane() {
   [ -n "$RUN_ID" ] || return 0
-  "$CARPOOL" _record-run --phase update --run-id "$RUN_ID" \
+  "$SUBFLEET" _record-run --phase update --run-id "$RUN_ID" \
     --lane "$CODEX_HOME_ARG" >/dev/null 2>&1 || true
 }
 
@@ -73,11 +73,11 @@ record_run_finish() {
   [ -n "$RUN_ID" ] || return 0
   record_args=(_record-run --phase finish --run-id "$RUN_ID" --rc "$final_rc")
   [ -z "$CODEX_HOME_ARG" ] || record_args+=(--lane "$CODEX_HOME_ARG")
-  "$CARPOOL" "${record_args[@]}" >/dev/null 2>&1 || true
+  "$SUBFLEET" "${record_args[@]}" >/dev/null 2>&1 || true
 }
 
 cleanup_owned_prompt() {
-  local owned_prompt=${CARPOOL_RUN_OWNED_PROMPT:-}
+  local owned_prompt=${SUBFLEET_RUN_OWNED_PROMPT:-}
   [ -n "$owned_prompt" ] || return 0
   if [ "$owned_prompt" != "$PROMPT_FILE" ]; then
     # A nested invocation may inherit an outer dispatcher marker. It does not
@@ -87,11 +87,11 @@ cleanup_owned_prompt() {
   case "$(basename "$owned_prompt")" in
     delegate-prompt-*.md)
       if ! rm -f "$owned_prompt" || [ -e "$owned_prompt" ]; then
-        echo "carpool codex: WARNING could not remove owned prompt $owned_prompt" >&2
+        echo "subfleet codex: WARNING could not remove owned prompt $owned_prompt" >&2
         return 1
       fi ;;
     *)
-      echo "carpool codex: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
+      echo "subfleet codex: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
       return 1 ;;
   esac
 }
@@ -110,12 +110,12 @@ trap 'exit 143' TERM
 # Record before selection and preflight so early dispatch failures remain
 # visible in the durable run ledger.
 record_run_start
-unset CARPOOL_RUN_DECISION_JSON CARPOOL_RUN_ORIGINAL_OUT CARPOOL_RUN_LANE_LOG
+unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG
 
 pick_lane() {
   local args home
-  if [ -n "${CARPOOL_CODEX_PICK:-}" ]; then
-    "$CARPOOL_CODEX_PICK"
+  if [ -n "${SUBFLEET_CODEX_PICK:-}" ]; then
+    "$SUBFLEET_CODEX_PICK"
     return
   fi
   args=(pick codex)
@@ -124,20 +124,20 @@ pick_lane() {
       args+=(--exclude "$home")
     done
   fi
-  "$CARPOOL" "${args[@]}"
+  "$SUBFLEET" "${args[@]}"
 }
 
 if [ -z "$CODEX_HOME_ARG" ]; then
   CODEX_HOME_ARG=$(pick_lane) || {
-    echo "carpool codex: no dispatchable lane" >&2
+    echo "subfleet codex: no dispatchable lane" >&2
     exit 1
   }
   [ -n "$CODEX_HOME_ARG" ] || {
-    echo "carpool codex: pick returned nothing" >&2
+    echo "subfleet codex: pick returned nothing" >&2
     exit 1
   }
   AUTO_LANE=1
-  echo "carpool codex: lane auto-assigned -> $CODEX_HOME_ARG" >&2
+  echo "subfleet codex: lane auto-assigned -> $CODEX_HOME_ARG" >&2
 fi
 record_run_lane
 
@@ -147,31 +147,31 @@ if [ "$SANDBOX" = "workspace-write" ]; then
   COMMON_DIR=$(git -C "$WORKDIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   [ -n "$COMMON_DIR" ] && EXTRA_CFG+=(-c "sandbox_workspace_write.writable_roots=[\"$COMMON_DIR\"]")
 fi
-if [ "${CARPOOL_CODEX_UNIFIED_EXEC:-on}" = "off" ]; then
+if [ "${SUBFLEET_CODEX_UNIFIED_EXEC:-on}" = "off" ]; then
   EXTRA_CFG+=(-c "features.unified_exec=false")
 fi
 
-CODEX_BIN=${CARPOOL_CODEX_BIN:-}
+CODEX_BIN=${SUBFLEET_CODEX_BIN:-}
 if [ -z "$CODEX_BIN" ]; then
-  CODEX_BIN=$("$CARPOOL" _codex-binary 2>/dev/null) || CODEX_BIN=""
+  CODEX_BIN=$("$SUBFLEET" _codex-binary 2>/dev/null) || CODEX_BIN=""
 fi
 [ -n "$CODEX_BIN" ] || {
-  echo "carpool codex: real codex binary not found" >&2
+  echo "subfleet codex: real codex binary not found" >&2
   exit 127
 }
 
 GUARD_ON=0
-if [ "${CARPOOL_CODEX_GUARD:-on}" = "off" ]; then
-  echo "carpool codex: command guard disabled" >&2
+if [ "${SUBFLEET_CODEX_GUARD:-on}" = "off" ]; then
+  echo "subfleet codex: command guard disabled" >&2
 else
   GUARD_ON=1
-  GUARD_OVERRIDE=$("$SCRIPT_DIR/carpool-guard" override) || {
-    echo "carpool codex: guard override generation failed; refusing to launch (set CARPOOL_CODEX_GUARD=off to bypass)" >&2
+  GUARD_OVERRIDE=$("$SCRIPT_DIR/subfleet-guard" override) || {
+    echo "subfleet codex: guard override generation failed; refusing to launch (set SUBFLEET_CODEX_GUARD=off to bypass)" >&2
     exit 2
   }
-  "$SCRIPT_DIR/carpool-guard" preflight -H "$CODEX_HOME_ARG" -C "$WORKDIR" \
+  "$SCRIPT_DIR/subfleet-guard" preflight -H "$CODEX_HOME_ARG" -C "$WORKDIR" \
     --codex "$CODEX_BIN" >&2 || {
-    echo "carpool codex: guard preflight failed; refusing to launch (set CARPOOL_CODEX_GUARD=off to bypass)" >&2
+    echo "subfleet codex: guard preflight failed; refusing to launch (set SUBFLEET_CODEX_GUARD=off to bypass)" >&2
     exit 2
   }
   EXTRA_CFG+=(-c "$GUARD_OVERRIDE")
@@ -191,7 +191,7 @@ salvage() {
         tree=$(GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" write-tree 2>/dev/null)
         if [ -n "$tree" ]; then
           salvage_sha=$(git -C "$WORKDIR" commit-tree "$tree" -p "$parent" \
-            -m "WIP salvage: carpool codex auto-commit (model=$MODEL)" 2>/dev/null)
+            -m "WIP salvage: subfleet codex auto-commit (model=$MODEL)" 2>/dev/null)
         fi
       fi
       rm -f "$tmpidx"
@@ -200,16 +200,16 @@ salvage() {
         ts=$(date +%Y%m%d-%H%M%S)
         ref="refs/codex-salvage/${branch//\//-}-$ts-$$"
         git -C "$WORKDIR" update-ref "$ref" "$salvage_sha" 2>/dev/null \
-          && echo "carpool codex: salvaged dirty state -> $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
+          && echo "subfleet codex: salvaged dirty state -> $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
       else
-        echo "carpool codex: WARNING dirty state present but salvage snapshot failed; worktree left as-is" >&2
+        echo "subfleet codex: WARNING dirty state present but salvage snapshot failed; worktree left as-is" >&2
       fi
     fi
   fi
   if [ -n "$SALVAGE_BRANCH" ]; then
     local push_src="${salvage_sha:-HEAD}"
     git -C "$WORKDIR" push -qf "$SALVAGE_REMOTE" "$push_src:refs/heads/$SALVAGE_BRANCH" 2>/dev/null \
-      && echo "carpool codex: pushed $push_src -> $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
+      && echo "subfleet codex: pushed $push_src -> $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
   fi
 }
 
@@ -217,7 +217,7 @@ on_exit() {
   local final_rc=$?
   trap - EXIT
   if ! cleanup_owned_prompt; then
-    echo "carpool codex: WARNING skipping salvage and push to protect the prompt" >&2
+    echo "subfleet codex: WARNING skipping salvage and push to protect the prompt" >&2
   else
     salvage
   fi
@@ -235,12 +235,12 @@ while :; do
     "$(cat "$PROMPT_FILE")" </dev/null >/dev/null 2>"$ERR_FILE"
   rc=$?
   if [ "$rc" -eq 0 ] && [ -s "$OUT_FILE" ]; then
-    echo "carpool codex: OK attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')"
+    echo "subfleet codex: OK attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')"
     exit 0
   fi
 
   if grep -qiE "content filter|trusted access|can('|’)t (help|assist) with" "$ERR_FILE"; then
-    echo "carpool codex: content filtered; rewrite the prompt before retrying" >&2
+    echo "subfleet codex: content filtered; rewrite the prompt before retrying" >&2
     exit 3
   fi
   if [ "$AUTO_LANE" = 1 ] && [ "$attempt" -le "$MAX_RETRIES" ] \
@@ -250,27 +250,27 @@ while :; do
     NEW_HOME=$(pick_lane) || NEW_HOME=""
     if [ -n "$NEW_HOME" ] && [ "$NEW_HOME" != "$OLD_HOME" ]; then
       if [ "$GUARD_ON" = 1 ] \
-         && ! "$SCRIPT_DIR/carpool-guard" preflight -H "$NEW_HOME" -C "$WORKDIR" \
+         && ! "$SCRIPT_DIR/subfleet-guard" preflight -H "$NEW_HOME" -C "$WORKDIR" \
            --codex "$CODEX_BIN" >&2; then
-        echo "carpool codex: guard refused the re-picked lane $NEW_HOME" >&2
+        echo "subfleet codex: guard refused the re-picked lane $NEW_HOME" >&2
       else
         CODEX_HOME_ARG=$NEW_HOME
         record_run_lane
-        echo "carpool codex: $OLD_HOME hit its usage limit; re-picked -> $NEW_HOME" >&2
+        echo "subfleet codex: $OLD_HOME hit its usage limit; re-picked -> $NEW_HOME" >&2
         continue
       fi
     else
-      echo "carpool codex: usage limit on $OLD_HOME and no alternate lane available" >&2
+      echo "subfleet codex: usage limit on $OLD_HOME and no alternate lane available" >&2
     fi
   fi
   if [ "$attempt" -le "$MAX_RETRIES" ] \
      && grep -qiE "capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out|temporarily" "$ERR_FILE"; then
     wait_s=$((60 * attempt))
-    echo "carpool codex: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s" >&2
+    echo "subfleet codex: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s" >&2
     sleep "$wait_s"
     continue
   fi
-  echo "carpool codex: FAILED rc=$rc attempt=$attempt; stderr tail:" >&2
+  echo "subfleet codex: FAILED rc=$rc attempt=$attempt; stderr tail:" >&2
   tail -3 "$ERR_FILE" >&2
   [ "$rc" -eq 0 ] && rc=1
   exit "$rc"

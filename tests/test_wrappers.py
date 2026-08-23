@@ -21,7 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
-WRAPPERS = ("carpool-claude", "carpool-codex")
+WRAPPERS = ("subfleet-claude", "subfleet-codex")
 
 
 def _write_executable(path: Path, source: str) -> Path:
@@ -30,9 +30,9 @@ def _write_executable(path: Path, source: str) -> Path:
     return path
 
 
-def _fake_carpool_with_usage(fake_bin: Path) -> Path:
+def _fake_subfleet_with_usage(fake_bin: Path) -> Path:
     return _write_executable(
-        fake_bin / "carpool",
+        fake_bin / "subfleet",
         """#!/usr/bin/env bash
 set -u
 if [ "$1" = secret ] && [ "$2" = get-for-account ]; then
@@ -41,7 +41,7 @@ if [ "$1" = secret ] && [ "$2" = get-for-account ]; then
   exit 0
 fi
 [ "$1" = lane-usage ] || exit 90
-exec "$WRAPPER_PYTHON" -m carpool.cli "$@"
+exec "$WRAPPER_PYTHON" -m subfleet.cli "$@"
 """,
     )
 
@@ -106,7 +106,7 @@ def _codex_env(fake_bin: Path, files: dict[str, Path]) -> dict[str, str]:
     return {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "CARPOOL_CODEX_GUARD": "off",
+        "SUBFLEET_CODEX_GUARD": "off",
         "WRAPPER_ARGS": os.fspath(files["args"]),
         "WRAPPER_HOME": os.fspath(files["home"]),
         "WRAPPER_COUNT": os.fspath(files["count"]),
@@ -133,7 +133,7 @@ def test_codex_run_forwards_effort_home_and_prompt(tmp_path):
 
     result = _run(
         "bash",
-        BIN / "carpool-codex",
+        BIN / "subfleet-codex",
         "-H",
         codex_home,
         "-m",
@@ -169,7 +169,7 @@ def test_codex_run_retries_transient_failure_without_losing_arguments(tmp_path):
 
     result = _run(
         "bash",
-        BIN / "carpool-codex",
+        BIN / "subfleet-codex",
         "-H",
         tmp_path / "codex-home",
         "-m",
@@ -212,7 +212,7 @@ def test_codex_run_salvages_dirty_tree_without_moving_head_or_index(tmp_path):
     prompt.write_text("Preserve this work")
     result = _run(
         "bash",
-        BIN / "carpool-codex",
+        BIN / "subfleet-codex",
         "-H",
         tmp_path / "codex-home",
         "-m",
@@ -242,7 +242,7 @@ def test_codex_run_salvages_dirty_tree_without_moving_head_or_index(tmp_path):
 def test_claude_lane_detach_keeps_prompt_until_child_finishes(tmp_path):
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
-    fake_carpool = _fake_carpool_with_usage(fake_bin)
+    fake_subfleet = _fake_subfleet_with_usage(fake_bin)
     invocation = tmp_path / "detach.invocation"
     release = tmp_path / "detach.release"
     done = tmp_path / "detach.done"
@@ -298,7 +298,7 @@ printf '{"is_error":false,"result":"detached result"}\n'
     original_prompt.write_text("prompt survives launcher exit\n")
     output = tmp_path / "answer.md"
     claude_dir = tmp_path / "claude-state"
-    state_dir = tmp_path / "carpool-state"
+    state_dir = tmp_path / "subfleet-state"
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -307,18 +307,18 @@ printf '{"is_error":false,"result":"detached result"}\n'
         "DETACH_RELEASE": os.fspath(release),
         "DETACH_DONE": os.fspath(done),
         "DETACH_CHILD_PROMPT_CAPTURE": os.fspath(prompt_capture),
-        "CLAUDE_LANE_CARPOOL": os.fspath(fake_carpool),
+        "CLAUDE_LANE_SUBFLEET": os.fspath(fake_subfleet),
         "CLAUDE_LANE_CLAUDE": os.fspath(fake_claude),
         "CLAUDE_LANE_CLAUDE_DIR": os.fspath(claude_dir),
         "FAKE_CLAUDE_DIR": os.fspath(claude_dir),
-        "CARPOOL_STATE_DIR": os.fspath(state_dir),
+        "SUBFLEET_STATE_DIR": os.fspath(state_dir),
         "PYTHONPATH": os.fspath(ROOT),
         "WRAPPER_PYTHON": sys.executable,
     }
 
     launcher = _run(
         "bash",
-        BIN / "carpool-claude",
+        BIN / "subfleet-claude",
         "-d",
         "-a",
         "lane@example.com",
@@ -372,7 +372,7 @@ def test_claude_lane_detach_fails_when_prompt_copy_cannot_be_created(tmp_path):
 
     result = _run(
         "bash",
-        BIN / "carpool-claude",
+        BIN / "subfleet-claude",
         "-d",
         "-a",
         "lane@example.com",
@@ -393,7 +393,7 @@ def test_claude_lane_scrubs_api_keys_and_marks_transcript_model_mismatch(tmp_pat
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     env_capture = tmp_path / "claude.env"
-    fake_carpool = _fake_carpool_with_usage(fake_bin)
+    fake_subfleet = _fake_subfleet_with_usage(fake_bin)
     fake_claude = _write_executable(
         fake_bin / "claude",
         """#!/usr/bin/env bash
@@ -430,25 +430,25 @@ printf '{"is_error":false,"result":"fake result"}\n'
     prompt.write_text("Review the example")
     output = tmp_path / "answer.md"
     claude_dir = tmp_path / "claude-state"
-    state_dir = tmp_path / "carpool-state"
+    state_dir = tmp_path / "subfleet-state"
     env = {
         **os.environ,
         "ANTHROPIC_API_KEY": "metered-api-value",
         "ANTHROPIC_AUTH_TOKEN": "metered-auth-value",
         "CLAUDE_ENV_CAPTURE": os.fspath(env_capture),
-        "CLAUDE_LANE_CARPOOL": os.fspath(fake_carpool),
+        "CLAUDE_LANE_SUBFLEET": os.fspath(fake_subfleet),
         "CLAUDE_LANE_CLAUDE": os.fspath(fake_claude),
         "CLAUDE_LANE_CLAUDE_DIR": os.fspath(claude_dir),
         "FAKE_CLAUDE_DIR": os.fspath(claude_dir),
         "FAKE_SERVED_MODEL": "claude-opus-example",
-        "CARPOOL_STATE_DIR": os.fspath(state_dir),
+        "SUBFLEET_STATE_DIR": os.fspath(state_dir),
         "PYTHONPATH": os.fspath(ROOT),
         "WRAPPER_PYTHON": sys.executable,
     }
 
     result = _run(
         "bash",
-        BIN / "carpool-claude",
+        BIN / "subfleet-claude",
         "-a",
         "lane@example.com",
         "-m",
@@ -490,7 +490,7 @@ printf '{"is_error":false,"result":"fake result"}\n'
 def test_claude_lane_records_hard_limit_before_returning_rc4(tmp_path):
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
-    fake_carpool = _fake_carpool_with_usage(fake_bin)
+    fake_subfleet = _fake_subfleet_with_usage(fake_bin)
     fake_claude = _write_executable(
         fake_bin / "claude",
         """#!/usr/bin/env bash
@@ -519,12 +519,12 @@ exit 1
     workdir.mkdir()
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("Review the example")
-    state_dir = tmp_path / "carpool-state"
+    state_dir = tmp_path / "subfleet-state"
     claude_dir = tmp_path / "claude-state"
     env = {
         **os.environ,
-        "CARPOOL_STATE_DIR": os.fspath(state_dir),
-        "CLAUDE_LANE_CARPOOL": os.fspath(fake_carpool),
+        "SUBFLEET_STATE_DIR": os.fspath(state_dir),
+        "CLAUDE_LANE_SUBFLEET": os.fspath(fake_subfleet),
         "CLAUDE_LANE_CLAUDE": os.fspath(fake_claude),
         "CLAUDE_LANE_CLAUDE_DIR": os.fspath(claude_dir),
         "FAKE_CLAUDE_DIR": os.fspath(claude_dir),
@@ -534,7 +534,7 @@ exit 1
 
     result = _run(
         "bash",
-        BIN / "carpool-claude",
+        BIN / "subfleet-claude",
         "-a",
         "lane@example.com",
         "-C",
@@ -547,7 +547,7 @@ exit 1
     )
 
     assert result.returncode == 4, result.stderr
-    assert "carpool claude: hard limit reset=" in result.stderr
+    assert "subfleet claude: hard limit reset=" in result.stderr
     records = [
         json.loads(line) for line in (state_dir / "lane-usage.jsonl").read_text().splitlines()
     ]
@@ -559,8 +559,8 @@ exit 1
 
 
 def test_wrapper_sources_retain_hardening_primitives():
-    codex = (BIN / "carpool-codex").read_text()
-    claude = (BIN / "carpool-claude").read_text()
+    codex = (BIN / "subfleet-codex").read_text()
+    claude = (BIN / "subfleet-claude").read_text()
 
     for source, ref_namespace in (
         (codex, "refs/codex-salvage/"),

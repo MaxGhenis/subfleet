@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# carpool CLI shim. Prefer the repository's managed environment, then python3.
+# Repository-relative entry point for the detached Codex login watcher.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -15,7 +15,7 @@ if [ ! -x "$PY" ]; then
     fi
   done
 fi
-[ -n "$PY" ] || { echo "carpool: Python 3.12 or newer is required" >&2; exit 2; }
+[ -n "$PY" ] || { echo "subfleet: Python 3.12 or newer is required" >&2; exit 2; }
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PY" -m carpool.cli "$@"
+exec "$PY" -m subfleet.login "$@"

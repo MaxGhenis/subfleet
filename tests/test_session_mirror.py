@@ -3,9 +3,9 @@
 import os
 import time
 
-from carpool import claude, paths, render, watchdog
-from carpool.claude import session_mirror_health
-from carpool.util import now_local
+from subfleet import claude, paths, render, watchdog
+from subfleet.claude import session_mirror_health
+from subfleet.util import now_local
 
 
 def touch(path, age_min=0.0):
@@ -198,14 +198,14 @@ class TestWatchdogMirrorCondition:
         summary = watchdog.run(snap=mirror_snapshot(stalled_mirror()))
         assert "cc-mirror-stalled" in summary["alerts_sent"]
         notice = env_paths["notify_log"].read_text()
-        assert "carpool mirror" in notice
+        assert "subfleet mirror" in notice
         assert "42.0 min" in notice
 
     def test_missing_scheduler_names_the_cause_without_platform_path(self, env_paths):
         watchdog.run(snap=mirror_snapshot(stalled_mirror(job_loaded=False)))
         notice = env_paths["notify_log"].read_text().lower()
         assert "scheduler" in notice or "job not" in notice
-        assert "carpool mirror" in notice
+        assert "subfleet mirror" in notice
 
     def test_healthy_absent_and_unavailable_states_are_silent(self, env_paths):
         healthy = {"status": "healthy", "age_min": 0.5, "job_loaded": True}

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# codex PATH shim — automatic carpool lane selection for headless commands.
+# codex PATH shim — automatic subfleet lane selection for headless commands.
 #
 # Interactive commands, explicit CODEX_HOME values, and callers setting
-# CARPOOL_NO_AUTOPICK pass through unchanged.
+# SUBFLEET_NO_AUTOPICK pass through unchanged.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-CARPOOL=${CARPOOL_SHIM_CARPOOL:-$SCRIPT_DIR/carpool}
+SUBFLEET=${SUBFLEET_SHIM_SUBFLEET:-$SCRIPT_DIR/subfleet}
 
-if [ -n "${CARPOOL_CODEX_BIN:-}" ]; then
-  REAL=$CARPOOL_CODEX_BIN
+if [ -n "${SUBFLEET_CODEX_BIN:-}" ]; then
+  REAL=$SUBFLEET_CODEX_BIN
 else
-  REAL=$("$CARPOOL" _codex-binary 2>/dev/null) || REAL=""
+  REAL=$("$SUBFLEET" _codex-binary 2>/dev/null) || REAL=""
 fi
 if [ -z "$REAL" ] || [ "$REAL" = "$0" ]; then
   echo "codex-shim: real codex binary not found" >&2
@@ -20,8 +20,8 @@ fi
 
 case "${1:-}" in
   exec|e|review)
-    if [ -z "${CODEX_HOME:-}" ] && [ -z "${CARPOOL_NO_AUTOPICK:-}" ]; then
-      if ! pick=$("$CARPOOL" pick codex 2>/dev/null); then
+    if [ -z "${CODEX_HOME:-}" ] && [ -z "${SUBFLEET_NO_AUTOPICK:-}" ]; then
+      if ! pick=$("$SUBFLEET" pick codex 2>/dev/null); then
         echo "codex-shim: no dispatchable Codex lane; refusing to use the desktop app home" >&2
         exit 1
       fi
@@ -30,7 +30,7 @@ case "${1:-}" in
         exit 1
       fi
       export CODEX_HOME="$pick"
-      echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or CARPOOL_NO_AUTOPICK=1 to opt out)" >&2
+      echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or SUBFLEET_NO_AUTOPICK=1 to opt out)" >&2
     fi
     ;;
 esac

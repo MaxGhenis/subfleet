@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from carpool import codex
+from subfleet import codex
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNNER = ROOT / "bin" / "carpool-codex"
+RUNNER = ROOT / "bin" / "subfleet-codex"
 SHIM = ROOT / "bin" / "codex"
 
 
@@ -29,7 +29,7 @@ def test_codex_binary_resolves_known_location_without_path(tmp_path, monkeypatch
     binary = _executable(home / ".bun" / "bin" / "codex", "#!/bin/sh\nexit 0\n")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr("shutil.which", lambda _name: None)
-    monkeypatch.delenv("CARPOOL_CODEX_BIN", raising=False)
+    monkeypatch.delenv("SUBFLEET_CODEX_BIN", raising=False)
 
     assert codex._codex_binary() == str(binary)
 
@@ -38,13 +38,13 @@ def test_codex_binary_fails_closed_without_real_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "empty-home"))
     monkeypatch.setattr("shutil.which", lambda _name: None)
     monkeypatch.setattr(Path, "is_file", lambda _self: False)
-    monkeypatch.delenv("CARPOOL_CODEX_BIN", raising=False)
+    monkeypatch.delenv("SUBFLEET_CODEX_BIN", raising=False)
 
     assert codex._codex_binary() is None
 
 
 def test_codex_binary_rejects_the_path_shim_as_an_override(monkeypatch):
-    monkeypatch.setenv("CARPOOL_CODEX_BIN", str(SHIM))
+    monkeypatch.setenv("SUBFLEET_CODEX_BIN", str(SHIM))
 
     assert codex._codex_binary() is None
 
@@ -73,8 +73,8 @@ printf 'finished on alternate lane\n' >"$out"
     lane_two = tmp_path / "codex-2"
     lane_one.mkdir()
     lane_two.mkdir()
-    fake_carpool = _executable(
-        tmp_path / "carpool",
+    fake_subfleet = _executable(
+        tmp_path / "subfleet",
         """#!/usr/bin/env bash
 case "$1" in
   _record-run)
@@ -109,8 +109,8 @@ exit 90
         ],
         env={
             **os.environ,
-            "CARPOOL_RUN_CARPOOL": str(fake_carpool),
-            "CARPOOL_CODEX_GUARD": "off",
+            "SUBFLEET_RUN_SUBFLEET": str(fake_subfleet),
+            "SUBFLEET_CODEX_GUARD": "off",
             "FAKE_CODEX_PATH": str(fake_codex),
             "LANE_ONE": str(lane_one),
             "LANE_TWO": str(lane_two),
@@ -157,12 +157,12 @@ exit "$FAKE_CODEX_RC"
     output = tmp_path / "caller-output.md"
     env = {
         **os.environ,
-        "CARPOOL_CODEX_BIN": str(fake_codex),
-        "CARPOOL_CODEX_GUARD": "off",
-        "CARPOOL_STATE_DIR": str(state),
+        "SUBFLEET_CODEX_BIN": str(fake_codex),
+        "SUBFLEET_CODEX_GUARD": "off",
+        "SUBFLEET_STATE_DIR": str(state),
         "FAKE_CODEX_RC": str(child_rc),
     }
-    env.pop("CARPOOL_RUN_OWNED_PROMPT", None)
+    env.pop("SUBFLEET_RUN_OWNED_PROMPT", None)
 
     completed = subprocess.run(
         [
@@ -199,11 +199,11 @@ def test_runner_records_failure_before_auto_pick(tmp_path):
     output = tmp_path / "out.md"
     env = {
         **os.environ,
-        "CARPOOL_CODEX_PICK": str(picker),
-        "CARPOOL_CODEX_GUARD": "off",
-        "CARPOOL_STATE_DIR": str(state),
+        "SUBFLEET_CODEX_PICK": str(picker),
+        "SUBFLEET_CODEX_GUARD": "off",
+        "SUBFLEET_STATE_DIR": str(state),
     }
-    env.pop("CARPOOL_RUN_OWNED_PROMPT", None)
+    env.pop("SUBFLEET_RUN_OWNED_PROMPT", None)
 
     completed = subprocess.run(
         [
@@ -236,8 +236,8 @@ printf '%s' "${CODEX_HOME:-}" >"$CAPTURE_HOME"
 printf '%s\n' "$@" >"$CAPTURE_ARGS"
 """,
     )
-    fake_carpool = _executable(
-        tmp_path / "carpool",
+    fake_subfleet = _executable(
+        tmp_path / "subfleet",
         """#!/usr/bin/env bash
 if [ "$1" = _codex-binary ]; then printf '%s\n' "$REAL_CODEX_PATH"; exit 0; fi
 if [ "$1" = pick ] && [ "$2" = codex ]; then printf '%s\n' "$PICK_LANE"; exit 0; fi
@@ -246,10 +246,10 @@ exit 1
     )
     env = os.environ.copy()
     env.pop("CODEX_HOME", None)
-    env.pop("CARPOOL_NO_AUTOPICK", None)
+    env.pop("SUBFLEET_NO_AUTOPICK", None)
     env.update(
         {
-            "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+            "SUBFLEET_SHIM_SUBFLEET": str(fake_subfleet),
             "REAL_CODEX_PATH": str(real),
             "PICK_LANE": str(lane),
             "CAPTURE_HOME": str(tmp_path / "home"),
@@ -271,15 +271,15 @@ def test_path_shim_respects_autopick_opt_out(tmp_path):
         tmp_path / "real-codex",
         "#!/usr/bin/env bash\nprintf '%s' \"${CODEX_HOME:-}\" >\"$CAPTURE_HOME\"\n",
     )
-    fake_carpool = _executable(
-        tmp_path / "carpool",
+    fake_subfleet = _executable(
+        tmp_path / "subfleet",
         "#!/usr/bin/env bash\nprintf '%s\\n' \"$REAL_CODEX_PATH\"\n",
     )
     env = {
         **os.environ,
-        "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+        "SUBFLEET_SHIM_SUBFLEET": str(fake_subfleet),
         "REAL_CODEX_PATH": str(real),
-        "CARPOOL_NO_AUTOPICK": "1",
+        "SUBFLEET_NO_AUTOPICK": "1",
         "CAPTURE_HOME": str(tmp_path / "home"),
     }
     env.pop("CODEX_HOME", None)
@@ -297,8 +297,8 @@ def test_path_shim_fails_closed_when_pick_is_unusable(tmp_path, pick_mode):
         tmp_path / "real-codex",
         "#!/usr/bin/env bash\ntouch \"$VENDOR_MARKER\"\n",
     )
-    fake_carpool = _executable(
-        tmp_path / "carpool",
+    fake_subfleet = _executable(
+        tmp_path / "subfleet",
         """#!/usr/bin/env bash
 if [ "$1" = _codex-binary ]; then printf '%s\n' "$REAL_CODEX_PATH"; exit 0; fi
 if [ "$1" = pick ]; then
@@ -311,14 +311,14 @@ exit 1
     )
     env = {
         **os.environ,
-        "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+        "SUBFLEET_SHIM_SUBFLEET": str(fake_subfleet),
         "REAL_CODEX_PATH": str(real),
         "PICK_MODE": pick_mode,
         "MISSING_LANE": str(tmp_path / "not-a-lane"),
         "VENDOR_MARKER": str(marker),
     }
     env.pop("CODEX_HOME", None)
-    env.pop("CARPOOL_NO_AUTOPICK", None)
+    env.pop("SUBFLEET_NO_AUTOPICK", None)
 
     completed = subprocess.run(
         [str(SHIM), "exec", "task"], env=env, text=True, capture_output=True
@@ -330,10 +330,10 @@ exit 1
 
 
 def test_path_shim_does_not_recurse_when_binary_resolution_fails(tmp_path):
-    fake_carpool = _executable(tmp_path / "carpool", "#!/bin/sh\nexit 1\n")
+    fake_subfleet = _executable(tmp_path / "subfleet", "#!/bin/sh\nexit 1\n")
     env = {
         **os.environ,
-        "CARPOOL_SHIM_CARPOOL": str(fake_carpool),
+        "SUBFLEET_SHIM_SUBFLEET": str(fake_subfleet),
     }
 
     completed = subprocess.run(

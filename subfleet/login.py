@@ -1,6 +1,6 @@
 """Stage and watch an interactive Codex lane login.
 
-``carpool login codex N`` starts the vendor login server in the requested
+``subfleet login codex N`` starts the vendor login server in the requested
 numbered home.  ``app`` targets the separately observed desktop-app home.  A
 detached watcher verifies that numbered lanes remain distinct after the user
 finishes the browser step; the app account is reported as a shadow instead of
@@ -59,7 +59,7 @@ def _target_home(target: str) -> tuple[Path, str]:
             return custom_by_slot[slot], slot
         return Path.home() / f".codex-{slot}", slot
     raise SystemExit(
-        "carpool login: target must be a lane number 1-9 or "
+        "subfleet login: target must be a lane number 1-9 or "
         f"'app', got {target!r}"
     )
 
@@ -156,11 +156,11 @@ def _open_authorize_url(
     """Open an authorize URL with a configured command or the system default."""
     try:
         command = _configured_command(
-            ("CARPOOL_LOGIN_BROWSER_CMD", "CARPOOL_BROWSER_CMD"),
+            ("SUBFLEET_LOGIN_BROWSER_CMD", "SUBFLEET_BROWSER_CMD"),
             ("login_browser_cmd", "browser_cmd"),
         )
     except config.ConfigError as exc:
-        print(f"carpool login: browser configuration error: {exc}", file=sys.stderr)
+        print(f"subfleet login: browser configuration error: {exc}", file=sys.stderr)
         return False
     if command:
         try:
@@ -170,11 +170,11 @@ def _open_authorize_url(
                 check=False,
             )
         except OSError as exc:
-            print(f"carpool login: could not start configured browser: {exc}", file=sys.stderr)
+            print(f"subfleet login: could not start configured browser: {exc}", file=sys.stderr)
             return False
         if result.returncode != 0:
             print(
-                "carpool login: configured browser exited with "
+                "subfleet login: configured browser exited with "
                 f"status {result.returncode}",
                 file=sys.stderr,
             )
@@ -183,7 +183,7 @@ def _open_authorize_url(
     try:
         return bool((opener or webbrowser.open)(url, new=2))
     except (OSError, webbrowser.Error) as exc:
-        print(f"carpool login: could not open the default browser: {exc}", file=sys.stderr)
+        print(f"subfleet login: could not open the default browser: {exc}", file=sys.stderr)
         return False
 
 
@@ -213,7 +213,7 @@ def _wait_for_authorize_url(
 
 
 def _watcher_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "bin" / "carpool-login-watch"
+    return Path(__file__).resolve().parent.parent / "bin" / "subfleet-login-watch"
 
 
 def _destination_label(home: Path, slot: str) -> str:
@@ -242,7 +242,7 @@ def codex_login(
     env = {**os.environ, "CODEX_HOME": str(home)}
     binary = codex_bin or _codex_binary()
     if not binary:
-        print("carpool login: real Codex binary not found", file=sys.stderr)
+        print("subfleet login: real Codex binary not found", file=sys.stderr)
         return 1
     try:
         with log.open("ab") as stream:
@@ -255,14 +255,14 @@ def codex_login(
                 start_new_session=True,
             )
     except OSError as exc:
-        print(f"carpool login: could not start {binary!r}: {exc}", file=sys.stderr)
+        print(f"subfleet login: could not start {binary!r}: {exc}", file=sys.stderr)
         return 1
     _secure_write(pidfile, f"{process.pid}\n")
 
     url = _wait_for_authorize_url(log, process, timeout_s)
     if not url:
         print(
-            "carpool login: no authorize URL from `codex login` within "
+            "subfleet login: no authorize URL from `codex login` within "
             f"{timeout_s:.0f}s (another login may already own the callback port) "
             f"— log: {log}",
             file=sys.stderr,
@@ -270,15 +270,15 @@ def codex_login(
         return 1
 
     destination = _destination_label(home, slot)
-    print(f"carpool login: server pid={process.pid} waiting for {destination}")
+    print(f"subfleet login: server pid={process.pid} waiting for {destination}")
     if open_browser:
         if _open_authorize_url(url):
             print(
-                "carpool login: OAuth URL opened in your browser — select the "
+                "subfleet login: OAuth URL opened in your browser — select the "
                 "account for this target, then authorize."
             )
         else:
-            print(f"carpool login: open this OAuth URL manually:\n{url}")
+            print(f"subfleet login: open this OAuth URL manually:\n{url}")
     else:
         print(url)
 
@@ -286,7 +286,7 @@ def codex_login(
         return 0
     watcher = _watcher_path()
     if not watcher.is_file() or not os.access(watcher, os.X_OK):
-        print(f"carpool login: watcher is missing or not executable: {watcher}", file=sys.stderr)
+        print(f"subfleet login: watcher is missing or not executable: {watcher}", file=sys.stderr)
         return 1
     watch_log = _watch_logfile(slot)
     _secure_truncate(watch_log)
@@ -301,11 +301,11 @@ def codex_login(
                 start_new_session=True,
             )
     except OSError as exc:
-        print(f"carpool login: could not start completion watcher: {exc}", file=sys.stderr)
+        print(f"subfleet login: could not start completion watcher: {exc}", file=sys.stderr)
         return 1
     _secure_write(_watch_pidfile(slot), f"{watch_process.pid}\n")
     print(
-        "carpool login: watcher armed (distinctness check and completion "
+        "subfleet login: watcher armed (distinctness check and completion "
         f"notification; log {watch_log})"
     )
     return 0
@@ -384,16 +384,16 @@ def _pid_alive(pid: int) -> bool:
 
 def _refresh_command() -> list[str]:
     configured = _configured_command(
-        ("CARPOOL_LOGIN_REFRESH_CMD", "CARPOOL_WATCH_CMD"),
+        ("SUBFLEET_LOGIN_REFRESH_CMD", "SUBFLEET_WATCH_CMD"),
         ("login_refresh_cmd", "watch_cmd"),
     )
     if configured:
         return configured
-    sibling = Path(__file__).resolve().parent.parent / "bin" / "carpool"
+    sibling = Path(__file__).resolve().parent.parent / "bin" / "subfleet"
     if sibling.is_file() and os.access(sibling, os.X_OK):
         return [str(sibling), "watch"]
-    installed = shutil.which("carpool")
-    return [installed or "carpool", "watch"]
+    installed = shutil.which("subfleet")
+    return [installed or "subfleet", "watch"]
 
 
 def _refresh_snapshot(
@@ -413,7 +413,7 @@ def _refresh_snapshot(
         return False, f"refresh command failed: {exc}"
     if result.returncode != 0:
         return False, f"refresh command exited with status {result.returncode}"
-    return True, "carpool watch refresh completed"
+    return True, "subfleet watch refresh completed"
 
 
 def _read_login_log(path: Path) -> str:
@@ -449,7 +449,7 @@ def _completion_notification(slot: str) -> int:
     notify.send(
         f"{_target_label(slot)} re-login complete",
         "All numbered Codex lanes hold distinct accounts."
-        f"{shadow_note} {refresh_note}. Check the table with `carpool status`.",
+        f"{shadow_note} {refresh_note}. Check the table with `subfleet status`.",
     )
     return 0
 
@@ -481,14 +481,14 @@ def watch_codex_login(
             notify.send(
                 f"{_target_label(slot)} login closed unfinished",
                 "The waiting login server exited before sign-in completed. "
-                f"Run `carpool login codex {slot}` to try again.",
+                f"Run `subfleet login codex {slot}` to try again.",
             )
             return 1
         if time.monotonic() >= deadline:
             notify.send(
                 f"{_target_label(slot)} login still pending after timeout",
                 "The browser authorization was not completed in time. "
-                f"Run `carpool login codex {slot}` when ready.",
+                f"Run `subfleet login codex {slot}` when ready.",
             )
             return 1
         time.sleep(max(poll_s, 0.01))
@@ -497,7 +497,7 @@ def watch_codex_login(
 def watcher_main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
-        print("usage: carpool login codex <N|app>", file=sys.stderr)
+        print("usage: subfleet login codex <N|app>", file=sys.stderr)
         return 2
     try:
         return watch_codex_login(args[0])

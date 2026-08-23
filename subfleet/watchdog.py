@@ -44,7 +44,7 @@ def _short(home: str) -> str:
 def _login_command(home: str) -> str:
     name = __import__("pathlib").Path(home).name
     target = name.removeprefix(".codex-") if name.startswith(".codex-") else "<lane>"
-    return f"carpool login codex {target}"
+    return f"subfleet login codex {target}"
 
 
 def _reprobe_home(home: str) -> dict:
@@ -173,7 +173,7 @@ def heal_expired_codex_homes(
 ) -> list[dict]:
     """Refresh only lanes with a clearly expired access token.
 
-    The vendor CLI owns token rotation and persistence; carpool never writes a
+    The vendor CLI owns token rotation and persistence; subfleet never writes a
     lane's ``auth.json``. A refresh-token revocation is definitive and is
     latched until ``auth_last_refresh`` changes. Other failures may retry after
     ``REFRESH_PROBE_SPACING_MIN``. The snapshot is updated in place.
@@ -252,7 +252,7 @@ def heal_expired_codex_homes(
             if state_changed:
                 atomic_write_json(paths.refresh_probes_path(), state)
     except OSError as exc:
-        print(f"carpool: refresh probe suppressed: cannot claim state ({exc})", file=sys.stderr)
+        print(f"subfleet: refresh probe suppressed: cannot claim state ({exc})", file=sys.stderr)
         return []
 
     for entry in claimed:
@@ -344,20 +344,20 @@ def heal_expired_codex_homes(
             )
         except OSError as exc:
             print(
-                f"carpool: warning: could not persist refresh result for {_short(home)}: {exc}",
+                f"subfleet: warning: could not persist refresh result for {_short(home)}: {exc}",
                 file=sys.stderr,
             )
             persisted_result = False
         if not persisted_result:
             print(
-                f"carpool: refresh result for {_short(home)} not persisted "
+                f"subfleet: refresh result for {_short(home)} not persisted "
                 "because this process no longer owns the claim",
                 file=sys.stderr,
             )
         verdicts_changed = verdicts_changed or result in ("healed", "revoked")
         events.append({"home": home, "result": result, "detail": detail})
         print(
-            f"carpool: refresh probe {_short(home)}: {result}"
+            f"subfleet: refresh probe {_short(home)}: {result}"
             + (f" ({detail})" if detail else ""),
             file=sys.stderr,
         )
@@ -395,7 +395,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         "`codex login` (starting a login purges the old token immediately).\n"
                         f"Heal: {_login_command(e['home'])}\n"
                         "Pick the account that home is supposed to hold; verify distinctness "
-                        "afterward with: carpool status"
+                        "afterward with: subfleet status"
                     ),
                 }
             )
@@ -474,7 +474,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         f"(seen {seen}). That home is dead until re-login.\n"
                         f"Heal: {_login_command(e['home'])}\n"
                         "Likely cause: the same account bound in two homes (one refresh revokes "
-                        "the sibling). Verify configured homes hold distinct accounts afterward: carpool status"
+                        "the sibling). Verify configured homes hold distinct accounts afterward: subfleet status"
                     ),
                 }
             )
@@ -525,7 +525,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                     f"{app_home.get('email') or app_home.get('account_id') or 'one account'}. "
                     "Concurrent token refreshes can revoke the lane, so dispatch is "
                     f"handicapping it. If the lane dies, run `{_login_command(lane_home)}`. "
-                    "`carpool status` shows all bindings without switching logins."
+                    "`subfleet status` shows all bindings without switching logins."
                 ),
             }
         )
@@ -543,7 +543,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 "severity": "critical",
                 "subject": "codex: NO dispatchable lanes",
                 "body": f"All codex accounts are exhausted, dead, or unknown.{reset_txt}\n"
-                        "Details: carpool status",
+                        "Details: subfleet status",
             }
         )
     elif fleet["dispatchable_now"] == 1:
@@ -585,7 +585,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                         f"Enrolled lane {lane['email']} has unusable credentials "
                         f"({lane['verdict']}) — headless dispatch to it will fail.\n"
                         f"Heal: claude setup-token   # sign into {lane['email']}\n"
-                        f"                 carpool enroll {lane['email']}"
+                        f"                 subfleet enroll {lane['email']}"
                     ),
                 }
             )
@@ -602,7 +602,7 @@ def evaluate_conditions(snap: dict) -> list[dict]:
                 "subject": "claude: no dispatchable lanes",
                 "body": (
                     f"All {lanes['enrolled']} enrolled Claude lane(s) are exhausted or "
-                    f"failing.{lane_reset_txt}\nDetails: carpool pick claude --json --all"
+                    f"failing.{lane_reset_txt}\nDetails: subfleet pick claude --json --all"
                 ),
             }
         )
@@ -619,12 +619,12 @@ def evaluate_conditions(snap: dict) -> list[dict]:
             restart = config.command("mirror_restart_cmd")
         except config.ConfigError:
             restart = None
-        recovery = shlex.join(restart) if restart else "carpool mirror --quiet"
+        recovery = shlex.join(restart) if restart else "subfleet mirror --quiet"
         conditions.append(
             {
                 "key": "cc-mirror-stalled",
                 "severity": "warn",
-                "subject": "carpool mirror: stalled",
+                "subject": "subfleet mirror: stalled",
                 "body": (
                     f"Desktop session mirroring has stopped ({detail}); account switches "
                     "may hide sessions until it runs again.\n"
