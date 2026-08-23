@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "bin" / "subfleet-mirror"
-VENDORED_SHA256 = "ec9bfc1bcad6fc708b1bb7e0c3b2d2fe12d977c4186bdbd5ae3cfa41dbdd04b2"
+VENDORED_SHA256 = "105c0eb5c78d37c3995638d2652e411efc6bcec130506d2c3b45aff911872359"
 
 
 def test_vendored_script_bytes_are_pinned():
