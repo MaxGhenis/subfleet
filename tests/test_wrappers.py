@@ -247,8 +247,11 @@ def test_claude_lane_detach_keeps_prompt_until_child_finishes(tmp_path):
     release = tmp_path / "detach.release"
     done = tmp_path / "detach.done"
     prompt_capture = tmp_path / "detach.prompt"
+    # The detach handoff launches through `python3 -c` (setsid + execv), so
+    # the observation seam interposes python3 and delegates to the real
+    # interpreter — the child still runs in its own session.
     _write_executable(
-        fake_bin / "nohup",
+        fake_bin / "python3",
         """#!/usr/bin/env bash
 set -u
 tmp_log="${DETACH_INVOCATION_LOG}.tmp"
@@ -261,7 +264,7 @@ mv "$tmp_log" "$DETACH_INVOCATION_LOG"
 while [ ! -e "$DETACH_RELEASE" ]; do
   /bin/sleep 0.01
 done
-"$@"
+"$WRAPPER_PYTHON" "$@"
 rc=$?
 printf '%s\n' "$rc" >"$DETACH_DONE"
 exit "$rc"

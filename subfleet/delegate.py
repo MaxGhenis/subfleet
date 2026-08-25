@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import capacity, config
+from . import capacity, config, inbox, run_ledger
 from .util import atomic_write_json, parse_iso
 
 FABLE_PATTERNS = (
@@ -271,6 +271,83 @@ def _append_decision(record: dict[str, Any]) -> None:
         f.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def launch_mode(args: argparse.Namespace, env: dict[str, str] | None = None) -> tuple[str, str]:
+    """Decide how the provider process is launched: ('detached'|'sync', why).
+
+    Inside a Claude Code session the tool shell's process tree dies with the
+    session (an account switch, or the desktop app stopping an idle session),
+    so the provider is launched in its own process session by default and
+    `subfleet run` returns immediately; `--attach` keeps the detached launch
+    but waits inline. Outside a session (schedulers, a terminal) the
+    synchronous runner path is unchanged; `-d` / SUBFLEET_RUN_DETACH=1 detach
+    anywhere.
+    """
+    env = os.environ if env is None else env
+    if args.dry_run:
+        return "sync", "dry-run"
+    if args.d:
+        return "detached", "-d"
+    override = (env.get("SUBFLEET_RUN_DETACH") or "").strip().lower()
+    if override in {"0", "false", "no", "off"}:
+        return "sync", "SUBFLEET_RUN_DETACH=0"
+    if override in {"1", "true", "yes", "on"}:
+        return "detached", "SUBFLEET_RUN_DETACH=1"
+    if inbox.in_claude_session(env):
+        if args.attach:
+            return "detached", "inside a Claude session; --attach waits inline"
+        return "detached", "inside a Claude session — the provider must outlive it"
+    return "sync", "outside a Claude session"
+
+
+def _short_home(value: str | None) -> str:
+    if not value:
+        return "-"
+    home = str(Path.home())
+    return "~" + value[len(home):] if value.startswith(home) else value
+
+
+def _default_slug(args: argparse.Namespace, prompt: str) -> str:
+    if args.name:
+        return args.name
+    if args.o:
+        return Path(args.o).name
+    if args.p:
+        return Path(args.p).name
+    words = re.findall(r"[A-Za-z0-9]+", prompt)[:5]
+    return "-".join(words).lower() or "run"
+
+
+def _announce(*, run_id: str, pid: int | None, model: str, lane: str | None,
+              output: str, lane_log: str, reason: str, wait_inline: bool,
+              as_json: bool, notify_target: dict[str, Any] | None) -> None:
+    target = None
+    if notify_target:
+        target = notify_target.get("name") or notify_target.get("session_id")
+    if as_json:
+        print(json.dumps({
+            "run_id": run_id, "pid": pid, "model": model, "lane": lane,
+            "out": output, "lane_log": lane_log, "detached": True,
+            "wait_inline": wait_inline, "reason": reason,
+            "notify_session": notify_target.get("session_id") if notify_target else None,
+        }, sort_keys=True))
+        return
+    print(
+        f"subfleet run: dispatched run={run_id} model={model} lane={_short_home(lane)}"
+        f" pid={pid or '?'} (detached — {reason})"
+    )
+    print(f"  out: {output}")
+    print(f"  log: {lane_log}")
+    if wait_inline:
+        print(f"  waiting inline; if this session restarts: subfleet wait {run_id}")
+        return
+    if target:
+        print(f"  done → this session ({target}) gets a completion message; "
+              f"to block instead: subfleet wait {run_id}   (ok under run_in_background)")
+    else:
+        print(f"  done → subfleet wait {run_id}   (blocks; ok under run_in_background)")
+    print(f"  status: subfleet runs --mine · details: subfleet runs show {run_id} · cancel: subfleet kill {run_id}")
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="subfleet run")
     p.add_argument("-t", choices=("fable", "review", "build", "sweep"))
@@ -281,7 +358,14 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-C", default=os.getcwd())
     p.add_argument("-o")
     p.add_argument("-s", choices=("read-only", "workspace-write"))
-    p.add_argument("-d", action="store_true")
+    p.add_argument("-d", "--detach", dest="d", action="store_true",
+                   help="force a detached launch (the default inside a Claude Code session)")
+    p.add_argument("--attach", "--wait", dest="attach", action="store_true",
+                   help="detached launch, but wait inline for the run to finish")
+    p.add_argument("-n", "--name", dest="name",
+                   help="short label for the ledger id / run table")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable dispatch line for detached launches")
     p.add_argument("-b")
     p.add_argument("--overflow", action="store_true")
     p.add_argument("--no-preamble", action="store_true")
@@ -332,8 +416,6 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.status:
         return _status()
-    if args.d and not args.o:
-        parser.error("-d requires -o")
     prompt = _prompt_text(args, parser)
     task_class, signals = classify(prompt, args.t)
     model = choose_model(task_class, args.m)
@@ -424,8 +506,13 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
     if cross_family_note:
         print(f"delegate: WARNING {cross_family_note}", file=sys.stderr)
 
+    mode, mode_reason = launch_mode(args)
+    wait_inline = bool(args.attach) and mode == "detached"
+    caller = inbox.caller_context(cwd=args.C)
     output = args.o
-    if not output:
+    if not output and mode != "detached":
+        # Detached runs without -o are hosted by the ledger (run_dir/out.md);
+        # synchronous ones still stream through a manufactured temp file.
         fd, output = tempfile.mkstemp(prefix="delegate-output-", suffix=".md")
         temp_paths.append(output)
         os.close(fd)
@@ -447,6 +534,108 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
     attempts = 0
     result = 3
     reason: str | None = None
+
+    def decision_record(lane_or_home: str | None, cmd: list[str],
+                        result: int | None) -> dict[str, Any]:
+        return {
+            "ts": _now().isoformat(), "class": task_class, "model": model,
+            "family": family, "requested_family": requested_family,
+            "lane/home": lane_or_home, "signals matched": signals,
+            "overrides": overrides, "capacity": capacity_context,
+            "cross_family": cross_family_note, "reason": reason,
+            "result": result, "cmd": cmd,
+        }
+
+    def runner_env(lane_or_home: str, cmd: list[str]) -> dict[str, str]:
+        env = os.environ.copy()
+        env.pop("SUBFLEET_RUN_LANE_LOG", None)
+        env["SUBFLEET_RUN_DECISION_JSON"] = json.dumps(
+            decision_record(lane_or_home, cmd, None), sort_keys=True, separators=(",", ":"),
+        )
+        # Empty means the delegate manufactured a temporary output because the
+        # caller did not supply -o; the ledger records that distinction as null.
+        env["SUBFLEET_RUN_ORIGINAL_OUT"] = args.o or ""
+        env.pop("SUBFLEET_RUN_ID", None)
+        if caller is not None:
+            env["SUBFLEET_RUN_CALLER_JSON"] = json.dumps(
+                caller, sort_keys=True, separators=(",", ":"))
+        else:
+            env.pop("SUBFLEET_RUN_CALLER_JSON", None)
+        return env
+
+    def launch_detached(lane_or_home: str, build_cmd) -> tuple[int, str | None, int | None]:
+        """Pre-create the ledger entry, then start the runner in its own
+        process session. Returns (result, run_id, pid)."""
+        nonlocal output
+        slug = _default_slug(args, prompt)
+        run_caller = caller
+        if wait_inline and caller is not None:
+            # This process is the consumer; the completion push is only needed
+            # if it dies before the run ends (inbox.on_finish checks the pid).
+            run_caller = {**caller, "waiter_pid": os.getpid()}
+        stem = output[:-3] if output and output.endswith(".md") else output
+        run_id = run_ledger.start_run(
+            family=family, model=MODEL_NAMES[model], lane=lane_or_home,
+            workdir=args.C, prompt=merged, out=output,
+            err=f"{stem}.err.log" if output else None,
+            lane_log=f"{stem}.lane.log" if output else None,
+            original_out=args.o or "", caller=run_caller, slug=slug,
+            launcher="subfleet run",
+        )
+        paths_ = run_ledger.run_paths(run_id)
+        output = paths_["out"]
+        lane_log = paths_["lane_log"]
+        cmd = build_cmd(output)
+        launch_env = runner_env(lane_or_home, cmd)
+        launch_env["SUBFLEET_RUN_LANE_LOG"] = lane_log
+        launch_env["SUBFLEET_RUN_OWNED_PROMPT"] = merged
+        launch_env["SUBFLEET_RUN_ID"] = run_id
+        run_ledger.update_run(run_id, decision=decision_record(lane_or_home, cmd, None))
+        try:
+            with open(lane_log, "ab") as log_stream:
+                proc = subprocess.Popen(
+                    ["nohup", *cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    env=launch_env,
+                )
+        except OSError as exc:
+            print(f"subfleet run: detached launch failed: {exc}", file=sys.stderr)
+            run_ledger.finish_run(run_id, rc=127)
+            return 127, run_id, None
+        run_ledger.update_run(run_id, pid=proc.pid)
+        # The detached runner now owns the temporary prompt and removes it
+        # through its exit path after ledgering it.
+        if merged in temp_paths:
+            temp_paths.remove(merged)
+        _announce(
+            run_id=run_id, pid=proc.pid, model=model, lane=lane_or_home,
+            output=output, lane_log=lane_log, reason=mode_reason,
+            wait_inline=wait_inline, as_json=args.json,
+            notify_target=inbox.find_session(caller["session_id"]) if caller else None,
+        )
+        sys.stdout.flush()
+        return 0, run_id, proc.pid
+
+    def wait_for(run_id: str) -> int:
+        done = run_ledger.wait_for_runs([run_id])
+        meta = done.get(run_id)
+        if meta is None:
+            return 124
+        print(run_ledger.summary_line(run_id, meta, prefix="subfleet run"), file=sys.stderr)
+        if meta.get("orphaned"):
+            return 125
+        rc = meta.get("rc")
+        if rc == 0 and not args.o:
+            try:
+                sys.stdout.write(Path(run_ledger.output_path(meta) or output).read_text())
+            except OSError:
+                pass
+        if not isinstance(rc, int):
+            return 1
+        return rc if rc >= 0 else 1
     while True:
         lane_or_home: str | None
         if family == "codex":
@@ -477,11 +666,27 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                     cmd = []
                     result = 3
                 else:
-                    cmd = [runner, "-H", lane_or_home, "-m", MODEL_NAMES[model],
-                           "-C", args.C, "-p", merged, "-o", output, "-s", sandbox]
-                    if model == "sol": cmd += ["-e", "ultra"]
-                    if args.b: cmd += ["-b", args.b]
-                    result = 0 if args.dry_run else subprocess.run(cmd).returncode
+                    def build_codex_cmd(out_path: str, *, home: str = lane_or_home,
+                                        tool: str = runner) -> list[str]:
+                        built = [tool, "-H", home, "-m", MODEL_NAMES[model],
+                                 "-C", args.C, "-p", merged, "-o", out_path, "-s", sandbox]
+                        if not args.H:
+                            built.append("-A")  # auto-picked: the runner re-picks on a usage limit
+                        if model == "sol": built += ["-e", "ultra"]
+                        if args.b: built += ["-b", args.b]
+                        return built
+
+                    if args.dry_run:
+                        cmd = build_codex_cmd(output)
+                        result = 0
+                    elif mode == "detached":
+                        result, run_id, _pid = launch_detached(lane_or_home, build_codex_cmd)
+                        cmd = build_codex_cmd(output)
+                        if result == 0 and wait_inline and run_id:
+                            result = wait_for(run_id)
+                    else:
+                        cmd = build_codex_cmd(output)
+                        result = subprocess.run(cmd, env=runner_env(lane_or_home, cmd)).returncode
         else:
             lane_or_home = args.a or pick_fable_lane(tried, capacity_rows)
             if not lane_or_home or attempts >= 3:
@@ -511,64 +716,78 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                     cmd = []
                     result = 3
                 else:
-                    cmd = [runner, "-a", lane_or_home, "-m", MODEL_NAMES[model],
-                           "-C", args.C, "-p", merged, "-o", output, "-s", sandbox]
-                    if args.d: cmd.append("-d")
-                    if args.b: cmd += ["-b", args.b]
-                    cp = None if args.dry_run else subprocess.run(cmd, capture_output=True, text=True)
-                    if cp is None:
-                        result = 0
+                    def build_claude_cmd(out_path: str, *, lane: str = lane_or_home,
+                                         tool: str = runner) -> list[str]:
+                        built = [tool, "-a", lane, "-m", MODEL_NAMES[model],
+                                 "-C", args.C, "-p", merged, "-o", out_path, "-s", sandbox]
+                        if mode == "detached" and not args.a:
+                            built.append("-A")  # auto-picked: the runner re-picks on a hard limit
+                        if args.b: built += ["-b", args.b]
+                        return built
+
+                    if mode == "detached":
+                        result, run_id, _pid = launch_detached(lane_or_home, build_claude_cmd)
+                        cmd = build_claude_cmd(output)
+                        if result == 0 and wait_inline and run_id:
+                            result = wait_for(run_id)
                     else:
-                        sys.stdout.write(cp.stdout); sys.stderr.write(cp.stderr)
-                        result = cp.returncode
-                        cooldown_until = None
-                        if result == 4:
-                            cooldown_until = _limited_until(cp.stderr + cp.stdout)
-                            record_cooldown(lane_or_home, cooldown_until)
-                        elif result == 5:
-                            cooldown_until = _now() + timedelta(days=30)
-                            record_cooldown(lane_or_home, cooldown_until)
-                            print(_reenroll_ritual(lane_or_home), file=sys.stderr)
-                        if result in (4, 5):
-                            runtime_limited_lanes.append(
-                                {
-                                    "resource": lane_or_home,
-                                    "email": lane_or_home,
-                                    "result": result,
-                                    "outcome": "hard_limit" if result == 4 else "auth_failure",
-                                    "limited_until": cooldown_until.isoformat(),
+                        cmd = build_claude_cmd(output)
+                        cp = None if args.dry_run else subprocess.run(
+                            cmd, capture_output=True, text=True,
+                            env=runner_env(lane_or_home, cmd))
+                        if cp is None:
+                            result = 0
+                        else:
+                            sys.stdout.write(cp.stdout); sys.stderr.write(cp.stderr)
+                            result = cp.returncode
+                            cooldown_until = None
+                            if result == 4:
+                                cooldown_until = _limited_until(cp.stderr + cp.stdout)
+                                record_cooldown(lane_or_home, cooldown_until)
+                            elif result == 5:
+                                cooldown_until = _now() + timedelta(days=30)
+                                record_cooldown(lane_or_home, cooldown_until)
+                                print(_reenroll_ritual(lane_or_home), file=sys.stderr)
+                            if result in (4, 5):
+                                runtime_limited_lanes.append(
+                                    {
+                                        "resource": lane_or_home,
+                                        "email": lane_or_home,
+                                        "result": result,
+                                        "outcome": "hard_limit" if result == 4 else "auth_failure",
+                                        "limited_until": cooldown_until.isoformat(),
+                                    }
+                                )
+                            if result in (4, 5) and not args.a and attempts < 3:
+                                attempt_record = {
+                                    "ts": _now().isoformat(), "class": task_class, "model": model,
+                                    "family": family, "requested_family": requested_family,
+                                    "lane/home": lane_or_home, "signals matched": signals,
+                                    "overrides": overrides, "capacity": capacity_context,
+                                    "cross_family": cross_family_note, "result": result, "cmd": cmd,
                                 }
-                            )
-                        if result in (4, 5) and not args.a and attempts < 3:
-                            attempt_record = {
-                                "ts": _now().isoformat(), "class": task_class, "model": model,
-                                "family": family, "requested_family": requested_family,
-                                "lane/home": lane_or_home, "signals matched": signals,
-                                "overrides": overrides, "capacity": capacity_context,
-                                "cross_family": cross_family_note, "result": result, "cmd": cmd,
-                            }
-                            _append_decision(attempt_record)
-                            if args.why:
-                                print("delegate decision: " + json.dumps(attempt_record, sort_keys=True), file=sys.stderr)
-                            continue
-                        if result in (4, 5):
-                            runtime_result = result
-                            result = 3
-                            if task_class == "fable":
-                                earliest = _earliest_cooldown_reset() or \
-                                    (scores.get("claude") or {}).get("earliest_reset")
-                                if args.a:
-                                    reason = (
-                                        f"FABLE FLOOR STOPPED: pinned Claude lane became "
-                                        f"unavailable (rc {runtime_result}); refusing any Sol downgrade"
-                                    )
-                                else:
-                                    reason = (
-                                        f"FABLE FLOOR STOPPED: Claude retry cap reached after "
-                                        f"{attempts} unavailable lane attempts; refusing any Sol downgrade"
-                                    )
-                                if earliest:
-                                    reason += f" (earliest reset {earliest})"
+                                _append_decision(attempt_record)
+                                if args.why:
+                                    print("delegate decision: " + json.dumps(attempt_record, sort_keys=True), file=sys.stderr)
+                                continue
+                            if result in (4, 5):
+                                runtime_result = result
+                                result = 3
+                                if task_class == "fable":
+                                    earliest = _earliest_cooldown_reset() or \
+                                        (scores.get("claude") or {}).get("earliest_reset")
+                                    if args.a:
+                                        reason = (
+                                            f"FABLE FLOOR STOPPED: pinned Claude lane became "
+                                            f"unavailable (rc {runtime_result}); refusing any Sol downgrade"
+                                        )
+                                    else:
+                                        reason = (
+                                            f"FABLE FLOOR STOPPED: Claude retry cap reached after "
+                                            f"{attempts} unavailable lane attempts; refusing any Sol downgrade"
+                                        )
+                                    if earliest:
+                                        reason += f" (earliest reset {earliest})"
 
         if reason:
             print(f"delegate: {reason}", file=sys.stderr)
@@ -584,7 +803,7 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
             print("delegate decision: " + json.dumps(record, sort_keys=True), file=sys.stderr)
         if args.dry_run:
             print(" ".join(__import__("shlex").quote(part) for part in cmd))
-        elif result == 0 and not args.o and Path(output).exists():
+        elif result == 0 and mode != "detached" and not args.o and Path(output).exists():
             sys.stdout.write(Path(output).read_text())
         return result
 

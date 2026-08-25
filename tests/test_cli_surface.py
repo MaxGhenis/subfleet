@@ -16,6 +16,7 @@ def test_help_exposes_unified_subcommand_surface(capsys):
     for command in (
         "status", "capacity", "runs", "pick", "run", "codex", "claude",
         "login", "enroll", "mirror", "errors", "watch", "brief",
+        "wait", "kill", "sessions", "notify", "hooks", "tickle", "muster",
     ):
         assert command in output
 
@@ -105,3 +106,87 @@ def test_brief_renders_cached_snapshot(monkeypatch, capsys):
 
     assert cli.main(["brief"]) == 0
     assert capsys.readouterr().out == "brief:example\n"
+
+
+def test_runs_routes_filters_and_reap(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_runs", lambda args: seen.append(args) or 0)
+
+    assert cli.main(["runs", "--mine", "--running", "--last", "5"]) == 0
+    assert seen[0].mine is True and seen[0].running is True and seen[0].last == 5
+    assert seen[0].runs_command is None
+    assert cli.main(["runs", "reap", "--dry-run", "--grace", "0"]) == 0
+    assert seen[1].runs_command == "reap"
+    assert seen[1].dry_run is True and seen[1].grace == 0.0
+
+
+def test_wait_routes_ids_and_flags(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_wait", lambda args: seen.setdefault("args", args) and 0)
+
+    assert cli.main(["wait", "a", "b", "--mine", "--last", "--timeout", "30",
+                     "--interval", "0.5", "--cat"]) == 0
+    args = seen["args"]
+    assert args.ids == ["a", "b"] and args.mine is True and args.last is True
+    assert args.timeout == 30.0 and args.interval == 0.5 and args.cat is True
+
+
+def test_kill_requires_and_routes_ids(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_kill", lambda args: seen.setdefault("args", args) and 0)
+
+    assert cli.main(["kill", "one", "two"]) == 0
+    assert seen["args"].ids == ["one", "two"]
+    with pytest.raises(SystemExit) as error:
+        cli.main(["kill"])
+    assert error.value.code == 2
+
+
+def test_sessions_and_notify_route(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_sessions", lambda args: seen.setdefault("sessions", args) and 0)
+    monkeypatch.setattr(cli, "cmd_notify_session", lambda args: seen.setdefault("notify", args) and 0)
+
+    assert cli.main(["sessions", "--json"]) == 0
+    assert seen["sessions"].json is True
+    assert cli.main(["notify", "hello", "--session", "sid", "--mode", "prompting"]) == 0
+    notify = seen["notify"]
+    assert notify.text == "hello" and notify.session == "sid" and notify.mode == "prompting"
+
+
+def test_hooks_defaults_to_status_and_routes_subcommands(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_hooks", lambda args: seen.append(args) or 0)
+
+    assert cli.main(["hooks"]) == 0
+    assert seen[0].hooks_command == "status"
+    assert cli.main(["hooks", "install", "--dry-run"]) == 0
+    assert seen[1].hooks_command == "install" and seen[1].dry_run is True
+    assert cli.main(["hooks", "uninstall"]) == 0
+    assert seen[2].hooks_command == "uninstall"
+
+
+def test_tickle_and_muster_route(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_tickle", lambda args: seen.setdefault("tickle", args) and 0)
+    monkeypatch.setattr(cli, "cmd_muster", lambda args: seen.setdefault("muster", args) and 0)
+    monkeypatch.setattr(cli, "cmd_tickle_worker", lambda args: seen.setdefault("worker", args) and 0)
+
+    assert cli.main(["tickle", "--session", "sid", "--force", "--dry-run"]) == 0
+    args = seen["tickle"]
+    assert args.session == "sid" and args.force is True and args.dry_run is True
+    assert cli.main(["muster", "--dry-run"]) == 0
+    assert seen["muster"].dry_run is True
+    assert cli.main(["_tickle", "--session", "sid", "--delay", "2.5"]) == 0
+    assert seen["worker"].session == "sid" and seen["worker"].delay == 2.5
+
+
+def test_record_run_accepts_the_adopt_phase(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_record_run", lambda args: seen.setdefault("args", args) and 0)
+
+    assert cli.main(["_record-run", "--phase", "adopt", "--run-id", "r1",
+                     "--pid", "4242", "--launcher", "subfleet run"]) == 0
+    args = seen["args"]
+    assert args.phase == "adopt" and args.run_id == "r1"
+    assert args.pid == 4242 and args.launcher == "subfleet run"

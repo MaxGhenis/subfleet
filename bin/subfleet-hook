@@ -1,0 +1,100 @@
+#!/bin/bash
+# subfleet-hook <pre-bash|user-prompt|session-start> — Claude Code hook entry
+# points (registered by `subfleet hooks install`; see subfleet/hooks.py).
+#
+#   pre-bash       PreToolUse[Bash] guard: a provider runner launched straight
+#                  from a session (`subfleet codex`, `subfleet claude`, bare
+#                  `codex exec`, or their wrapper scripts) dies with that
+#                  session on an account switch or the desktop app's idle
+#                  SIGTERM. Blocked with the `subfleet run` replacement. `-d`
+#                  (the runners' own setsid detach) passes; so does an explicit
+#                  `SUBFLEET_ATTACHED_OK=1` on the command.
+#   user-prompt    UserPromptSubmit: surface parked completion notices.
+#   session-start  SessionStart: same, including notices that were pushed
+#                  while the previous process of this session was dying —
+#                  and the resume nudge: a session restarted mid-turn gets a
+#                  "continue" message pushed into its own inbox a few seconds
+#                  later (subfleet/tickle.py), so an interrupted turn resumes
+#                  without anyone reopening the session by hand.
+#
+# Fast path first: pure bash/grep for the guard, a single stat for the
+# notice check; python is only entered when there is something to say.
+set -u
+
+export LC_ALL=C
+export PATH="/usr/bin:/bin:${PATH:-/usr/sbin:/sbin}"
+: "${HOME:=/var/empty}"
+
+HERE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SUBFLEET="$HERE/subfleet"
+event=${1:-}
+input=$(cat 2>/dev/null) || input=""
+
+JQ="${SUBFLEET_JQ:-}"
+if [ -z "$JQ" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    JQ=$(command -v jq)
+  elif [ -x /opt/homebrew/bin/jq ]; then
+    JQ=/opt/homebrew/bin/jq
+  elif [ -x /usr/bin/jq ]; then
+    JQ=/usr/bin/jq
+  fi
+fi
+[ -n "$JQ" ] && [ -x "$JQ" ] || exit 0
+
+block() {
+  printf '{"decision":"block","reason":%s}\n' "$(printf '%s' "$1" | "$JQ" -Rs .)"
+  exit 0
+}
+
+case "$event" in
+  pre-bash)
+    cmd=$(printf '%s' "$input" | "$JQ" -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+    [ -n "$cmd" ] || exit 0
+    # Cheap prefilter: nothing to do unless a runner verb is even mentioned.
+    printf '%s' "$cmd" | grep -qE 'codex|claude-lane|subfleet-claude|subfleet[[:space:]]+claude' || exit 0
+    printf '%s' "$cmd" | grep -qE '(^|[^A-Za-z0-9_])SUBFLEET_ATTACHED_OK=1([^A-Za-z0-9_]|$)' && exit 0
+    # Only a runner in COMMAND position counts: first word of a (sub)command,
+    # optionally path-prefixed, after env assignments / nohup / exec / time.
+    # `bash -n bin/subfleet-claude` or a heredoc that mentions the name is not
+    # a launch.
+    cmdpos='(^|[;&|(][[:space:]]*|(nohup|exec|time)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*([^[:space:]]*/)?'
+    offender=""
+    if printf '%s' "$cmd" | grep -qE "${cmdpos}subfleet[[:space:]]+(codex|claude)([[:space:]]|\$)"; then
+      offender=$(printf '%s' "$cmd" | grep -oE 'subfleet[[:space:]]+(codex|claude)' | head -1 | tr -s '[:space:]' ' ' | sed 's/[[:space:]]*$//')
+    elif printf '%s' "$cmd" | grep -qE "${cmdpos}(codex-run|claude-lane|subfleet-codex|subfleet-claude)([[:space:]]|\$)"; then
+      offender=$(printf '%s' "$cmd" | grep -oE '(codex-run|claude-lane|subfleet-codex|subfleet-claude)' | head -1)
+    elif printf '%s' "$cmd" | grep -qE "${cmdpos}codex[[:space:]]+(exec|e|review)([[:space:]]|\$)"; then
+      offender="codex exec"
+    fi
+    [ -n "$offender" ] || exit 0
+    # The runners' own -d re-execs under setsid: survivable, allowed.
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]])-d([[:space:]]|$)'; then
+      case "$offender" in
+        "codex exec") ;;  # bare codex has no -d; fall through to block
+        *) exit 0 ;;
+      esac
+    fi
+    block "[attached-runner] \`$offender\` launched from this session dies with the session: an account switch or the desktop app's idle SIGTERM kills every process the session started. Use the detached front door instead: \`subfleet run [-m fable|sol|terra|haiku] [-t build|review|sweep] -C <dir> -p prompt.md -o out.md\`. Inside a session it launches the provider in its own process session, returns immediately with a run id, and this session receives a completion message when the run finishes; block on it with \`subfleet wait <id>\` (fine under run_in_background), and check status with \`subfleet runs --mine\`. One-off override for a deliberately short attached call: prefix the command with SUBFLEET_ATTACHED_OK=1."
+    ;;
+  session-start)
+    # Always enter python here: besides parked notices, a restarted session
+    # whose last turn was cut off gets a resume nudge (subfleet/tickle.py).
+    sid=$(printf '%s' "$input" | "$JQ" -r '.session_id // empty' 2>/dev/null) || exit 0
+    [ -n "$sid" ] || exit 0
+    printf '%s' "$input" | exec "$SUBFLEET" _session-hook "$event"
+    ;;
+  user-prompt)
+    sid=$(printf '%s' "$input" | "$JQ" -r '.session_id // empty' 2>/dev/null) || exit 0
+    [ -n "$sid" ] || exit 0
+    state=${SUBFLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/subfleet}
+    safe=$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '-')
+    [ -s "$state/notices/$safe.jsonl" ] || exit 0
+    printf '%s' "$input" | exec "$SUBFLEET" _session-hook "$event"
+    ;;
+  *)
+    echo "subfleet-hook: unknown event '$event' (pre-bash|user-prompt|session-start)" >&2
+    exit 2
+    ;;
+esac
+exit 0
