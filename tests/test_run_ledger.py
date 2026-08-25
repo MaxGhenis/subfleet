@@ -159,8 +159,15 @@ def test_runs_list_load_format_and_running_marker(tmp_path):
             "rc": None,
             "status": "RUNNING",
             "out_bytes": 0,
+            "out_path": str(tmp_path / "new.md"),
             "duration_s": None,
+            "started_at": "2026-08-22T09:00:00+00:00",
+            "finished_at": None,
             "workdir": "some-worktree",
+            "pid": None,
+            "caller_session": None,
+            "notify": None,
+            "launcher": None,
         }
     ]
     assert run_ledger.in_flight_counts() == {("codex", "/lanes/two"): 1}

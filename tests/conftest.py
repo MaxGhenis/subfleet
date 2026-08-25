@@ -18,6 +18,26 @@ def isolated_state(tmp_path, monkeypatch):
         "SUBFLEET_CODEX_HOMES",
         "DELEGATE_STATE_DIR",
         "DELEGATE_ACCOUNTS_FILE",
+        # The suite often runs from inside a Claude Code session; its tool
+        # shell exports the session identity that flips `subfleet run` into
+        # detached mode and makes runners record a caller. Tests opt in
+        # explicitly.
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_HOST_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "SUBFLEET_RUN_DETACH",
+        "SUBFLEET_RUN_ID",
+        "SUBFLEET_RUN_CALLER_JSON",
+        "SUBFLEET_RUN_LANE_LOG",
+        "SUBFLEET_NOTIFY_MODE",
+        "SUBFLEET_CLAUDE_SETTINGS",
+        "SUBFLEET_CODEX_DETACHED",
+        # Never read the operator's real session registry or transcripts.
+        "SUBFLEET_CLAUDE_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 

@@ -7,16 +7,26 @@
 # the worktree. See docs/guard.md for the optional command guard.
 #
 # Usage:
-#   subfleet codex [-H <codex_home>] -m <model> -C <workdir> \
+#   subfleet codex [-H <codex_home>] [-A] -m <model> -C <workdir> \
 #     -p <prompt_file> -o <out_file> [-s <sandbox>] [-b <salvage_branch>] \
-#     [-R <salvage_remote>] [-r <max_retries>] [-e <reasoning_effort>]
+#     [-R <salvage_remote>] [-r <max_retries>] [-e <reasoning_effort>] [-d]
+#   -A  with -H: start on that lane but re-pick on a usage limit (auto-lane
+#       behaviour with a chosen first lane); without -H it is implied.
+#   -d  detach: re-exec in a new process session and return at once; progress
+#       goes to <out_file base>.lane.log. Survives the launching shell and a
+#       Claude Code session restart.
+#   env: SUBFLEET_RUN_ID  ledger entry pre-created by `subfleet run` — adopted
+#        (lane/pid/paths filled in) instead of starting a second record.
 set -u
 
+ORIG_ARGS=("$@")
 CODEX_HOME_ARG="" MODEL="" WORKDIR="" PROMPT_FILE="" OUT_FILE="" EFFORT=""
 SANDBOX="workspace-write" SALVAGE_BRANCH="" SALVAGE_REMOTE="origin" MAX_RETRIES=2
-while getopts "H:m:C:p:o:s:b:R:r:e:" opt; do
+AUTO_FLAG=0 DETACH=0
+while getopts "H:Am:C:p:o:s:b:R:r:e:d" opt; do
   case "$opt" in
     H) CODEX_HOME_ARG=$OPTARG ;;
+    A) AUTO_FLAG=1 ;;
     m) MODEL=$OPTARG ;;
     C) WORKDIR=$OPTARG ;;
     p) PROMPT_FILE=$OPTARG ;;
@@ -26,6 +36,7 @@ while getopts "H:m:C:p:o:s:b:R:r:e:" opt; do
     R) SALVAGE_REMOTE=$OPTARG ;;
     r) MAX_RETRIES=$OPTARG ;;
     e) EFFORT=$OPTARG ;;
+    d) DETACH=1 ;;
     *) exit 2 ;;
   esac
 done
@@ -46,16 +57,47 @@ ERR_FILE="${OUT_FILE%.md}.err.log"
 ORIGINAL_OUT_FILE=${SUBFLEET_RUN_ORIGINAL_OUT-$OUT_FILE}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SUBFLEET=${SUBFLEET_RUN_SUBFLEET:-$SCRIPT_DIR/subfleet}
+SELF=$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")
+
+# -d: re-exec this script in a NEW process session. Plain `nohup … &` stays in
+# the launching shell's process group, which dies with a Claude Code session;
+# setsid() makes the runner immune (macOS ships no setsid binary, python does).
+if [ "$DETACH" = 1 ] && [ "${SUBFLEET_CODEX_DETACHED:-}" != 1 ]; then
+  LANE_LOG=${SUBFLEET_RUN_LANE_LOG:-${OUT_FILE%.md}.lane.log}
+  command -v python3 >/dev/null || { echo "subfleet codex: -d needs python3 for setsid" >&2; exit 2; }
+  SUBFLEET_CODEX_DETACHED=1 SUBFLEET_RUN_LANE_LOG="$LANE_LOG" \
+    python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$SELF" "${ORIG_ARGS[@]}" </dev/null >>"$LANE_LOG" 2>&1 &
+  pid=$!
+  disown "$pid" 2>/dev/null || true
+  echo "subfleet codex: detached pid=$pid · log=$LANE_LOG · out=$OUT_FILE"
+  exit 0
+fi
+
 AUTO_LANE=0
 RUN_ID=""
 EXCLUDED_HOMES=()
 
 record_run_start() {
   local record_args
+  if [ -n "${SUBFLEET_RUN_ID:-}" ]; then
+    # `subfleet run` pre-created the entry (so the caller knows the id before
+    # we exist); fill in what only the runner knows. A finished or unknown id
+    # is refused by the ledger, in which case we start our own record.
+    record_args=(
+      _record-run --phase adopt --run-id "$SUBFLEET_RUN_ID" --pid $$
+      --out "$OUT_FILE" --err "$ERR_FILE"
+    )
+    [ -z "$CODEX_HOME_ARG" ] || record_args+=(--lane "$CODEX_HOME_ARG")
+    [ -z "${SUBFLEET_RUN_LANE_LOG:-}" ] || record_args+=(--lane-log "$SUBFLEET_RUN_LANE_LOG")
+    RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+    [ -z "$RUN_ID" ] || return 0
+  fi
   record_args=(
     _record-run --phase start --family codex --model "$MODEL"
     --lane "$CODEX_HOME_ARG" --workdir "$WORKDIR" --prompt "$PROMPT_FILE"
     --out "$OUT_FILE" --err "$ERR_FILE" --original-out "$ORIGINAL_OUT_FILE"
+    --pid $$ --launcher "subfleet codex"
   )
   [ -z "${SUBFLEET_RUN_LANE_LOG:-}" ] || record_args+=(--lane-log "$SUBFLEET_RUN_LANE_LOG")
   RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
@@ -110,7 +152,9 @@ trap 'exit 143' TERM
 # Record before selection and preflight so early dispatch failures remain
 # visible in the durable run ledger.
 record_run_start
-unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG
+# Nested dispatches from inside the lane must not inherit this run's identity.
+unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG \
+      SUBFLEET_RUN_ID SUBFLEET_RUN_CALLER_JSON SUBFLEET_CODEX_DETACHED
 
 pick_lane() {
   local args home
@@ -138,6 +182,9 @@ if [ -z "$CODEX_HOME_ARG" ]; then
   }
   AUTO_LANE=1
   echo "subfleet codex: lane auto-assigned -> $CODEX_HOME_ARG" >&2
+elif [ "$AUTO_FLAG" = 1 ]; then
+  AUTO_LANE=1
+  echo "subfleet codex: starting on ${CODEX_HOME_ARG/#$HOME/~}; will re-pick on a usage limit (-A)" >&2
 fi
 record_run_lane
 

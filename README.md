@@ -85,7 +85,14 @@ ledger and learns cooldowns from actual hard-limit responses.
 | `subfleet errors` | Show recently observed provider limit and authentication errors. |
 | `subfleet watch [--dry-run]` | Take one snapshot, evaluate health transitions, and send or print alerts. |
 | `subfleet brief` | Print a compact Markdown capacity section. |
-| `subfleet runs` | Inspect the durable prompt/output/error ledger; `runs show ID` displays one run. |
+| `subfleet runs [--mine] [--running]` | Inspect the durable prompt/output/error ledger; `runs show ID` displays one run, `runs reap` finalizes entries whose runner died. |
+| `subfleet wait [ID ...] [--mine] [--last]` | Block until dispatched runs finish; the exit code reflects the worst result (124 timeout, 125 orphaned, 2 unknown id). |
+| `subfleet kill ID ...` | Signal a running dispatch; the runner's exit path salvages and finalizes its ledger entry. |
+| `subfleet sessions` | List live Claude Code sessions that can receive messages. |
+| `subfleet notify [--session ID] TEXT` | Push a message into a Claude Code session inbox (default: the current session). |
+| `subfleet tickle [--session ID \| --all]` | Resume-nudge sessions whose last turn was cut off by a restart. |
+| `subfleet muster [--dry-run]` | Roll-call recently active sessions after a restart where nothing was cut off. |
+| `subfleet hooks install\|uninstall\|status` | Manage the Claude Code hook entries: completion catch-up, resume nudges, and the attached-runner guard. |
 
 Use `subfleet COMMAND --help` for monitor and router options. The pass-through
 runners intentionally retain their concise shell usage strings.
@@ -127,6 +134,97 @@ enables the `bin/codex` shim. It selects a lane for headless `exec`, `e`, and
 `review` calls when `CODEX_HOME` is unset. Set `SUBFLEET_NO_AUTOPICK=1` to opt
 out; interactive commands and explicit homes pass through unchanged. subfleet
 resolves the real Codex executable without depending on scheduler `PATH`.
+
+## Detached runs and completion notices
+
+A run dispatched from inside a Claude Code session must outlive that session:
+the desktop app restarts every session on an account switch and stops an idle
+session's process group. Inside a session — detected through the environment
+the session's tool shell exports — `subfleet run` therefore pre-creates the
+run-ledger entry, launches the runner in its own process session, and returns
+immediately with the run id and paths. Outside a session, dispatch stays
+synchronous. `-d` forces a detached launch anywhere, `--attach` keeps the
+detached launch but waits inline (if the waiting process dies, the run
+continues and `subfleet wait` re-joins it), and `SUBFLEET_RUN_DETACH=0|1`
+overrides the detection in either direction. A detached run without `-o`
+writes to `<state>/runs/<id>/out.md`; `-n NAME` labels the run id.
+
+When the runner finishes, its exit path pushes a completion notice into the
+dispatching session's inbox over the harness's local cross-session messaging
+socket. The recipient is resolved by session id at finish time, not by the
+process or socket captured at dispatch, so the notice still arrives after the
+session restarted under a new process. The notice carries a status summary —
+run id, state, lane, duration, output path and size, the output's first line,
+and a short error tail on failure — never the prompt or the full output. The
+notice's permission attestation defaults to the recipient's own recorded
+permission class; `SUBFLEET_NOTIFY_MODE` (`bypass`, `prompting`, `none`)
+overrides it.
+
+If the session is not running at finish time, the notice is parked under the
+state directory and surfaced as context the next time that session starts or
+prompts, through the hooks below.
+
+```bash
+subfleet run -C /path/to/project -p task.md -o result.md   # returns a run id
+subfleet wait RUN_ID
+subfleet runs --mine --running
+subfleet kill RUN_ID
+```
+
+Both runners adopt a pre-created ledger entry through `SUBFLEET_RUN_ID`
+instead of starting a second record, and never pass run identity on to
+dispatches nested inside the lane. `subfleet codex` also accepts `-A` (start
+on the given lane but re-pick on a usage limit) and `-d` (re-exec in a new
+process session and return at once, with progress in the lane log).
+
+## Resume nudges (tickle)
+
+An account switch or app relaunch restarts every open Claude Code session; a
+session that was mid-turn sits idle until someone types into it. On
+SessionStart (sources `startup` and `resume` only), the hook classifies the
+session's own transcript. When the last real turn was cut off — a tool call
+with no recorded result, a tool result the model never continued from, or an
+unanswered prompt, but not a deliberate interrupt and not a completed turn —
+a detached worker pushes a "continue where you left off" message into the
+session's inbox a few seconds later. The desktop app's own resume stub pair
+is recognized and skipped, and provider limit banners are noted in the nudge.
+
+Guards: `SUBFLEET_TICKLE=off` disables; interruptions older than
+`SUBFLEET_TICKLE_MAX_AGE_S` (default 8 hours) are left alone; one nudge per
+interruption point plus a per-session cooldown; and the transcript must be
+unchanged across the delivery delay, so a session that already continued is
+never nudged on top. `subfleet tickle --all [--dry-run]` is the manual sweep;
+it additionally requires two minutes of transcript quiet, since outside
+SessionStart an interrupted-looking tail can just be a long tool call.
+`subfleet tickle --session ID --force` overrides every guard. Outcomes and
+skip reasons land in `<state>/tickles/`.
+
+`subfleet muster [--dry-run]` is the roll call for a restart where nothing
+was cut off (for example, the account moved to usage credits and every turn
+ended normally). Each session whose last turn — completed or interrupted —
+falls inside the roll-call window (`SUBFLEET_MUSTER_MAX_AGE_S`, default
+2 hours) gets a message asking it to pick its standing work back up, with
+the same transcript-quiet discipline as the manual sweep and one call per
+interruption point.
+
+## Claude Code hooks
+
+`subfleet hooks install` adds three entries to `~/.claude/settings.json`
+(override the path with `SUBFLEET_CLAUDE_SETTINGS`), all routed through
+`bin/subfleet-hook`:
+
+- `SessionStart` / `UserPromptSubmit` — surface parked completion notices;
+  SessionStart also runs the resume-nudge classifier.
+- `PreToolUse` (Bash) — block `subfleet codex`, `subfleet claude`, and bare
+  `codex exec` launched directly from a session, since they die with it; the
+  message names the `subfleet run` replacement. The runners' own `-d` passes,
+  and prefixing a command with `SUBFLEET_ATTACHED_OK=1` is the explicit
+  one-off override.
+
+Install is idempotent, preserves the rest of the settings file, and writes a
+timestamped backup beside it before any change. `subfleet hooks uninstall`
+removes exactly the subfleet entries. The hook script uses `jq` when present
+and stays silent when it is not.
 
 ## Monitoring and repair
 
@@ -179,8 +277,11 @@ Common environment overrides are `SUBFLEET_CONFIG_DIR`, `SUBFLEET_STATE_DIR`,
 `SUBFLEET_SECRET_STORE_CMD`, `SUBFLEET_NOTIFY_CMD`,
 `SUBFLEET_MIRROR_HEARTBEAT`,
 `SUBFLEET_MIRROR_JOB_LABEL`, `SUBFLEET_MIRROR_RESTART_CMD`,
-`SUBFLEET_LOGIN_BROWSER_CMD`, `SUBFLEET_LOGIN_REFRESH_CMD`, and
-`SUBFLEET_CODEX_GUARD=off` for an explicit one-run guard bypass.
+`SUBFLEET_LOGIN_BROWSER_CMD`, `SUBFLEET_LOGIN_REFRESH_CMD`,
+`SUBFLEET_CODEX_GUARD=off` for an explicit one-run guard bypass,
+`SUBFLEET_RUN_DETACH`, `SUBFLEET_NOTIFY_MODE`, `SUBFLEET_TICKLE`,
+`SUBFLEET_TICKLE_MAX_AGE_S`, `SUBFLEET_MUSTER_MAX_AGE_S`, and
+`SUBFLEET_CLAUDE_SETTINGS`.
 
 subfleet does not embed secrets or local account identifiers in repository
 files. Runtime ledgers are created in the configured state directory with
