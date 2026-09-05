@@ -284,3 +284,64 @@ class TestResetClock:
         reset = parse_reset_clock("resets 6:40pm (America/New_York)", event)
         assert reset is not None
         assert reset.utcoffset().total_seconds() == -4 * 3600
+
+
+class TestApiKeyLogin:
+    """Lanes run on ChatGPT subscriptions only; an API-key home is refused."""
+
+    @staticmethod
+    def _home(tmp_path, payload):
+        # Not tmp_path / "home": conftest points $HOME there, and a lane that
+        # *is* $HOME is (correctly) shown as "~" in the refusal message.
+        home = tmp_path / "codex-api"
+        home.mkdir()
+        (home / "auth.json").write_text(json.dumps(payload))
+        return home
+
+    def test_openai_api_key_login_is_detected(self, tmp_path):
+        home = self._home(tmp_path, {
+            "OPENAI_API_KEY": "sk-test", "auth_mode": "apikey", "tokens": None,
+        })
+        assert codex.api_key_login(home) is True
+
+    @pytest.mark.parametrize("mode", ["apikey", "ApiKey", "api_key", "API-KEY"])
+    def test_auth_mode_spellings_without_a_stored_key(self, tmp_path, mode):
+        home = self._home(tmp_path, {"OPENAI_API_KEY": None, "auth_mode": mode})
+        assert codex.api_key_login(home) is True
+
+    def test_codex_api_key_field_counts(self, tmp_path):
+        home = self._home(tmp_path, {"CODEX_API_KEY": "sk-test", "tokens": None})
+        assert codex.api_key_login(home) is True
+
+    def test_chatgpt_login_is_not_an_api_login(self, tmp_path):
+        home = self._home(tmp_path, make_auth_json("acct-1", "a@example.com"))
+        assert codex.api_key_login(home) is False
+        assert codex.api_lane_refusal(home) is None
+
+    def test_missing_corrupt_or_non_object_auth_is_not_an_api_login(self, tmp_path):
+        assert codex.api_key_login(tmp_path / "nope") is False
+        home = tmp_path / "codex-broken"
+        home.mkdir()
+        (home / "auth.json").write_text("{not json")
+        assert codex.api_key_login(home) is False
+        (home / "auth.json").write_text("[1, 2]")
+        assert codex.api_key_login(home) is False
+
+    def test_refusal_names_home_and_override(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(codex.API_LANE_OVERRIDE_ENV, raising=False)
+        home = self._home(tmp_path, {"OPENAI_API_KEY": "sk-test", "auth_mode": "apikey"})
+        message = codex.api_lane_refusal(home)
+        assert message is not None
+        assert "API-key login" in message
+        assert "ChatGPT subscriptions only" in message
+        assert f"{codex.API_LANE_OVERRIDE_ENV}=1" in message
+        assert str(home) in message or home.name in message
+
+    def test_override_env_allows_a_deliberate_api_dispatch(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, {"OPENAI_API_KEY": "sk-test", "auth_mode": "apikey"})
+        monkeypatch.setenv(codex.API_LANE_OVERRIDE_ENV, "1")
+        assert codex.api_lane_allowed() is True
+        assert codex.api_lane_refusal(home) is None
+        monkeypatch.setenv(codex.API_LANE_OVERRIDE_ENV, "yes")
+        assert codex.api_lane_allowed() is False
+        assert codex.api_lane_refusal(home) is not None

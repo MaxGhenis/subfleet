@@ -105,3 +105,31 @@ def test_brief_renders_cached_snapshot(monkeypatch, capsys):
 
     assert cli.main(["brief"]) == 0
     assert capsys.readouterr().out == "brief:example\n"
+
+
+class TestApiLaneCheck:
+    """`subfleet _api-lane-check HOME`: the runner and shim's subscription-only gate."""
+
+    def test_api_key_home_is_refused_with_rc_7(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("SUBFLEET_ALLOW_API_LANE", raising=False)
+        home = tmp_path / "codex-api"
+        home.mkdir()
+        (home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-test", "auth_mode": "apikey"}')
+        assert cli.main(["_api-lane-check", str(home)]) == 7
+        err = capsys.readouterr().err
+        assert "subfleet:" in err and "ChatGPT subscriptions only" in err
+
+    def test_chatgpt_and_missing_homes_pass(self, tmp_path, capsys):
+        home = tmp_path / "codex-1"
+        home.mkdir()
+        (home / "auth.json").write_text('{"OPENAI_API_KEY": null, "auth_mode": "chatgpt", "tokens": {}}')
+        assert cli.main(["_api-lane-check", str(home)]) == 0
+        assert cli.main(["_api-lane-check", str(tmp_path / "absent")]) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_override_env_passes(self, tmp_path, monkeypatch):
+        home = tmp_path / "codex-api"
+        home.mkdir()
+        (home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-test", "auth_mode": "apikey"}')
+        monkeypatch.setenv("SUBFLEET_ALLOW_API_LANE", "1")
+        assert cli.main(["_api-lane-check", str(home)]) == 0

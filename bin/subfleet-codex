@@ -6,6 +6,10 @@
 # snapshots dirty Git state on exit without changing HEAD, the real index, or
 # the worktree. See docs/guard.md for the optional command guard.
 #
+# Lanes run on ChatGPT subscriptions only: a home whose auth.json is an OpenAI
+# API-key login is refused with rc 7 before any codex call, and an exported
+# CODEX_API_KEY is dropped. SUBFLEET_ALLOW_API_LANE=1 is the deliberate override.
+#
 # Usage:
 #   subfleet codex [-H <codex_home>] -m <model> -C <workdir> \
 #     -p <prompt_file> -o <out_file> [-s <sandbox>] [-b <salvage_branch>] \
@@ -140,6 +144,41 @@ if [ -z "$CODEX_HOME_ARG" ]; then
   echo "subfleet codex: lane auto-assigned -> $CODEX_HOME_ARG" >&2
 fi
 record_run_lane
+
+# Subscription only: lanes never run on the metered OpenAI platform API. An
+# exported CODEX_API_KEY overrides a ChatGPT auth.json (on codex 0.153.3 a
+# bogus key produced a 401 from api.openai.com), so it is dropped; an exported
+# OPENAI_API_KEY does not (the same probe answered on the subscription) and is
+# left alone for task scripts. A home whose auth.json is an API-key login is
+# refused with rc 7 before any codex call; SUBFLEET_ALLOW_API_LANE=1 is the
+# deliberate override. The check is self-contained (python3, mirroring
+# subfleet.codex.api_key_login) so it holds even where the subfleet CLI is
+# unavailable.
+api_key_login_home() {
+  [ -f "$1/auth.json" ] || return 1
+  python3 - "$1/auth.json" <<'PY'
+import json, sys
+try:
+    raw = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if not isinstance(raw, dict):
+    sys.exit(1)
+if any(raw.get(k) for k in ("OPENAI_API_KEY", "CODEX_API_KEY")):
+    sys.exit(0)
+mode = str(raw.get("auth_mode") or "").lower().replace("_", "").replace("-", "")
+sys.exit(0 if mode == "apikey" else 1)
+PY
+}
+if [ "${SUBFLEET_ALLOW_API_LANE:-}" != "1" ]; then
+  unset CODEX_API_KEY
+  if api_key_login_home "$CODEX_HOME_ARG"; then
+    shown=$CODEX_HOME_ARG
+    [ -z "${HOME:-}" ] || shown=${CODEX_HOME_ARG/#$HOME/\~}
+    echo "subfleet codex: $shown is an OpenAI API-key login (metered platform billing); lanes run on ChatGPT subscriptions only (SUBFLEET_ALLOW_API_LANE=1 overrides deliberately)" >&2
+    exit 7
+  fi
+fi
 
 EXTRA_CFG=()
 [ -n "$EFFORT" ] && EXTRA_CFG+=(-c "model_reasoning_effort=\"$EFFORT\"")
