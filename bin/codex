@@ -2,7 +2,10 @@
 # codex PATH shim — automatic subfleet lane selection for headless commands.
 #
 # Interactive commands, explicit CODEX_HOME values, and callers setting
-# SUBFLEET_NO_AUTOPICK pass through unchanged.
+# SUBFLEET_NO_AUTOPICK pass through unchanged, with one exception: a headless
+# command whose CODEX_HOME is an OpenAI API-key login (metered platform
+# billing) is refused with rc 7 unless SUBFLEET_ALLOW_API_LANE=1, because
+# lanes run on ChatGPT subscriptions only.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -31,6 +34,11 @@ case "${1:-}" in
       fi
       export CODEX_HOME="$pick"
       echo "codex-shim: CODEX_HOME unset -> $pick (set CODEX_HOME or SUBFLEET_NO_AUTOPICK=1 to opt out)" >&2
+    fi
+    # Subscription only: a CODEX_HOME that is an OpenAI API-key login is
+    # refused (rc 7) unless SUBFLEET_ALLOW_API_LANE=1.
+    if [ "${SUBFLEET_ALLOW_API_LANE:-}" != "1" ] && [ -n "${CODEX_HOME:-}" ] && [ -x "$SUBFLEET" ]; then
+      "$SUBFLEET" _api-lane-check "$CODEX_HOME" || exit 7
     fi
     ;;
 esac

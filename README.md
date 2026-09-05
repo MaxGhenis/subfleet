@@ -106,6 +106,30 @@ Claude when the default family has no dispatchable lane. Explicit `-H` and
 `-a` options pin a resource. `-m`, `-t`, `-s`, `-d`, and `-b` provide model,
 task-class, sandbox, detached-run, and salvage-branch overrides.
 
+Model aliases for `-m` are `fable` (claude-fable-5), `opus` (claude-opus-5),
+and `haiku` (claude-haiku-4-5-20251001) on Claude lanes, and `terra`
+(gpt-5.6-terra) and `astra` (gpt-6-astra) on Codex lanes. Without `-m`, review
+and build work is standard work: it starts on Opus and moves upward to Astra
+only when no Claude lane is dispatchable (the decision log records the move as
+a `CAPABILITY FALLBACK`); it never moves downward. Sweeps start on Terra and
+overflow to Claude only when the whole Codex fleet is exhausted. Prose,
+adjudication, and strategy work stays on Fable and fails fast rather than
+downgrading. Exact `-m`, `-a`, and `-H` pins never move; a `-H CODEX_HOME` pin
+with no `-m` implies `astra`. Astra is dispatched at `ultra` reasoning effort.
+`sol` (gpt-5.6-sol) is retired from every automatic route: `-m sol` still
+parses but dispatches Astra and says so on stderr. GPT-6 Astra needs Codex CLI
+0.153.0 or newer; its catalog entry is hidden from the interactive model
+picker but dispatchable, and it draws on the same weekly window as the other
+Codex models, so the capacity view and picker need nothing new.
+
+Lanes run on ChatGPT subscriptions only, never on the metered OpenAI platform
+API. `subfleet codex` refuses a home whose `auth.json` is an API-key login
+(rc 7, before any codex call) and drops an exported `CODEX_API_KEY`, which
+would otherwise override a ChatGPT login; `subfleet run -H` refuses such a
+home up front, and the `bin/codex` shim refuses an API-keyed `CODEX_HOME` for
+headless commands. `SUBFLEET_ALLOW_API_LANE=1` is the deliberate operator
+override.
+
 The provider runners are also available directly:
 
 ```bash
@@ -179,8 +203,10 @@ Common environment overrides are `SUBFLEET_CONFIG_DIR`, `SUBFLEET_STATE_DIR`,
 `SUBFLEET_SECRET_STORE_CMD`, `SUBFLEET_NOTIFY_CMD`,
 `SUBFLEET_MIRROR_HEARTBEAT`,
 `SUBFLEET_MIRROR_JOB_LABEL`, `SUBFLEET_MIRROR_RESTART_CMD`,
-`SUBFLEET_LOGIN_BROWSER_CMD`, `SUBFLEET_LOGIN_REFRESH_CMD`, and
-`SUBFLEET_CODEX_GUARD=off` for an explicit one-run guard bypass.
+`SUBFLEET_LOGIN_BROWSER_CMD`, `SUBFLEET_LOGIN_REFRESH_CMD`,
+`SUBFLEET_CODEX_GUARD=off` for an explicit one-run guard bypass, and
+`SUBFLEET_ALLOW_API_LANE=1` for a deliberate one-run dispatch to an OpenAI
+API-key login.
 
 subfleet does not embed secrets or local account identifiers in repository
 files. Runtime ledgers are created in the configured state directory with

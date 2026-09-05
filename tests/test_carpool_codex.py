@@ -241,6 +241,7 @@ printf '%s\n' "$@" >"$CAPTURE_ARGS"
         """#!/usr/bin/env bash
 if [ "$1" = _codex-binary ]; then printf '%s\n' "$REAL_CODEX_PATH"; exit 0; fi
 if [ "$1" = pick ] && [ "$2" = codex ]; then printf '%s\n' "$PICK_LANE"; exit 0; fi
+if [ "$1" = _api-lane-check ]; then printf '%s\n' "$2" >>"$CHECK_LOG"; exit 0; fi
 exit 1
 """,
     )
@@ -254,6 +255,7 @@ exit 1
             "PICK_LANE": str(lane),
             "CAPTURE_HOME": str(tmp_path / "home"),
             "CAPTURE_ARGS": str(tmp_path / "args"),
+            "CHECK_LOG": str(tmp_path / "checks"),
         }
     )
 
@@ -264,6 +266,8 @@ exit 1
     assert completed.returncode == 0, completed.stderr
     assert (tmp_path / "home").read_text() == str(lane)
     assert (tmp_path / "args").read_text().splitlines() == [command, "--example"]
+    # The picked lane still passes through the subscription-only gate.
+    assert (tmp_path / "checks").read_text().splitlines() == [str(lane)]
 
 
 def test_path_shim_respects_autopick_opt_out(tmp_path):
@@ -342,3 +346,189 @@ def test_path_shim_does_not_recurse_when_binary_resolution_fails(tmp_path):
 
     assert completed.returncode == 127
     assert "real codex binary not found" in completed.stderr
+
+
+def _api_key_home(tmp_path: Path, name: str = "codex-api") -> Path:
+    home = tmp_path / name
+    home.mkdir()
+    (home / "auth.json").write_text(
+        json.dumps({"OPENAI_API_KEY": "sk-test", "auth_mode": "apikey", "tokens": None})
+    )
+    return home
+
+
+def _chatgpt_home(tmp_path: Path, name: str = "codex-1") -> Path:
+    home = tmp_path / name
+    home.mkdir()
+    (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": None, "auth_mode": "chatgpt"}))
+    return home
+
+
+def _env_capturing_codex(path: Path, capture: Path) -> Path:
+    """A fake codex that records whether CODEX_API_KEY reached it."""
+    return _executable(
+        path,
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"${{CODEX_API_KEY:-unset}}\" >'{capture}'\n"
+        "out=''\n"
+        'while [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then out=$2; shift 2; else shift; fi; done\n'
+        "printf 'codex finished\\n' >\"$out\"\n",
+    )
+
+
+def _runner_env(tmp_path: Path, fake_codex: Path, **extra: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for name in ("SUBFLEET_ALLOW_API_LANE", "CODEX_API_KEY", "SUBFLEET_RUN_OWNED_PROMPT"):
+        env.pop(name, None)
+    env.update(
+        {
+            "SUBFLEET_CODEX_BIN": str(fake_codex),
+            "SUBFLEET_CODEX_GUARD": "off",
+            "SUBFLEET_STATE_DIR": str(tmp_path / "state"),
+        }
+    )
+    env.update(extra)
+    return env
+
+
+def _runner_args(tmp_path: Path, home: Path, model: str = "gpt-6-astra") -> list[str]:
+    workdir = tmp_path / "work"
+    workdir.mkdir(exist_ok=True)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("do the task\n")
+    return [
+        str(RUNNER), "-H", str(home), "-m", model, "-C", str(workdir),
+        "-p", str(prompt), "-o", str(tmp_path / "caller-output.md"), "-r", "0",
+    ]
+
+
+def test_runner_refuses_an_api_key_home_before_any_codex_call(tmp_path):
+    marker = tmp_path / "vendor-ran"
+    fake_codex = _executable(
+        tmp_path / "real-codex", "#!/usr/bin/env bash\ntouch \"$VENDOR_MARKER\"\n"
+    )
+    env = _runner_env(tmp_path, fake_codex, VENDOR_MARKER=str(marker))
+
+    completed = subprocess.run(
+        _runner_args(tmp_path, _api_key_home(tmp_path)),
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+
+    assert completed.returncode == 7
+    assert "ChatGPT subscriptions only" in completed.stderr
+    assert "SUBFLEET_ALLOW_API_LANE=1" in completed.stderr
+    assert not marker.exists()  # codex was never invoked
+    run_dirs = [path for path in (tmp_path / "state" / "runs").iterdir() if path.is_dir()]
+    assert len(run_dirs) == 1
+    metadata = json.loads((run_dirs[0] / "meta.json").read_text())
+    assert metadata["rc"] == 7
+    assert metadata["finished_at"] is not None
+
+
+def test_runner_drops_codex_api_key_from_the_lane_environment(tmp_path):
+    capture = tmp_path / "seen-key.txt"
+    fake_codex = _env_capturing_codex(tmp_path / "real-codex", capture)
+    env = _runner_env(tmp_path, fake_codex, CODEX_API_KEY="sk-must-not-leak")
+
+    completed = subprocess.run(
+        _runner_args(tmp_path, _chatgpt_home(tmp_path), model="gpt-test"),
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert capture.read_text().strip() == "unset"
+    assert (tmp_path / "caller-output.md").read_text() == "codex finished\n"
+
+
+def test_runner_override_allows_a_deliberate_api_dispatch(tmp_path):
+    capture = tmp_path / "seen-key.txt"
+    fake_codex = _env_capturing_codex(tmp_path / "real-codex", capture)
+    env = _runner_env(
+        tmp_path, fake_codex, SUBFLEET_ALLOW_API_LANE="1", CODEX_API_KEY="sk-deliberate"
+    )
+
+    completed = subprocess.run(
+        _runner_args(tmp_path, _api_key_home(tmp_path)),
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert capture.read_text().strip() == "sk-deliberate"
+
+
+def _shim_env(tmp_path: Path, real: Path, home: Path, **extra: str) -> dict[str, str]:
+    """Drive the shim with the real subfleet CLI and an explicit CODEX_HOME."""
+    env = os.environ.copy()
+    for name in ("SUBFLEET_ALLOW_API_LANE", "SUBFLEET_NO_AUTOPICK", "SUBFLEET_SHIM_SUBFLEET"):
+        env.pop(name, None)
+    env.update(
+        {
+            "SUBFLEET_CODEX_BIN": str(real),
+            "CODEX_HOME": str(home),
+            "CAPTURE_HOME": str(tmp_path / "home"),
+            "VENDOR_MARKER": str(tmp_path / "vendor-ran"),
+        }
+    )
+    env.update(extra)
+    return env
+
+
+def _shim_real_codex(tmp_path: Path) -> Path:
+    return _executable(
+        tmp_path / "real-codex",
+        "#!/usr/bin/env bash\n"
+        "touch \"$VENDOR_MARKER\"\n"
+        "printf '%s' \"${CODEX_HOME:-}\" >\"$CAPTURE_HOME\"\n",
+    )
+
+
+def test_path_shim_refuses_an_explicit_api_key_home(tmp_path):
+    real = _shim_real_codex(tmp_path)
+    env = _shim_env(tmp_path, real, _api_key_home(tmp_path))
+
+    completed = subprocess.run(
+        [str(SHIM), "exec", "task"], env=env, text=True, capture_output=True, timeout=20
+    )
+
+    assert completed.returncode == 7, completed.stderr
+    assert "ChatGPT subscriptions only" in completed.stderr
+    assert not (tmp_path / "vendor-ran").exists()
+
+
+def test_path_shim_passes_an_explicit_chatgpt_home(tmp_path):
+    real = _shim_real_codex(tmp_path)
+    home = _chatgpt_home(tmp_path)
+    env = _shim_env(tmp_path, real, home)
+
+    completed = subprocess.run(
+        [str(SHIM), "exec", "task"], env=env, text=True, capture_output=True, timeout=20
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "home").read_text() == str(home)
+
+
+def test_path_shim_override_allows_a_deliberate_api_home(tmp_path):
+    real = _shim_real_codex(tmp_path)
+    home = _api_key_home(tmp_path)
+    env = _shim_env(tmp_path, real, home, SUBFLEET_ALLOW_API_LANE="1")
+
+    completed = subprocess.run(
+        [str(SHIM), "exec", "task"], env=env, text=True, capture_output=True, timeout=20
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "home").read_text() == str(home)
+
+
+def test_path_shim_leaves_interactive_commands_alone_even_on_an_api_home(tmp_path):
+    real = _shim_real_codex(tmp_path)
+    home = _api_key_home(tmp_path)
+    env = _shim_env(tmp_path, real, home)
+
+    completed = subprocess.run(
+        [str(SHIM), "login", "status"], env=env, text=True, capture_output=True, timeout=20
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "vendor-ran").exists()

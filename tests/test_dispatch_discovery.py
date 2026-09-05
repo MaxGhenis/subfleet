@@ -140,11 +140,16 @@ def test_subfleet_run_uses_temp_config_and_shared_state(tmp_path):
     )
 
     assert cp.returncode == 0, cp.stderr
+    # Build work is standard work (Opus); with no Claude lane at all it moves
+    # upward to Astra on the one dispatchable Codex home.
     assert str(BIN_DIR / "subfleet-codex") in cp.stdout
-    assert "gpt-5.6-sol" in cp.stdout
+    assert "gpt-6-astra" in cp.stdout
     assert "-e ultra" in cp.stdout
+    assert "CAPABILITY FALLBACK" in cp.stderr and "build/standard upward to astra" in cp.stderr
     assert '"class": "build"' in cp.stderr
     decisions = state_home / "subfleet" / "decisions.jsonl"
     records = [json.loads(line) for line in decisions.read_text().splitlines()]
-    assert records[-1]["model"] == "sol"
+    assert records[-1]["model"] == "astra"
+    assert records[-1]["requested_model"] == "opus"
+    assert "upward to astra" in records[-1]["routing"]
     assert records[-1]["lane/home"] == codex_home

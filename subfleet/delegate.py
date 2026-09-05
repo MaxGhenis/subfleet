@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import capacity, config
+from . import codex as codex_side
 from .util import atomic_write_json, parse_iso
 
 FABLE_PATTERNS = (
@@ -45,12 +46,42 @@ SWEEP_PATTERNS = (r"for each", r"per-file", r"per-item", r"per-row", r"batch of"
 MECHANICAL_PATTERNS = (r"verify", r"count", r"list", r"extract", r"check")
 BUILD_PATTERNS = (r"implement", r"fix", r"refactor", r"port", r"migrate", r"wire", r"test")
 
-MODEL_FAMILY = {"fable": "claude", "haiku": "claude", "sol": "codex", "terra": "codex"}
-MODEL_NAMES = {
-    "fable": "claude-fable-5", "haiku": "claude-haiku-4-5-20251001",
-    "sol": "gpt-5.6-sol", "terra": "gpt-5.6-terra",
+MODEL_FAMILY = {
+    "fable": "claude", "opus": "claude", "haiku": "claude",
+    "sol": "codex", "terra": "codex", "astra": "codex",
 }
-CLAUDE_OVERFLOW_MODEL = {"build": "fable", "review": "fable", "sweep": "haiku"}
+MODEL_NAMES = {
+    "fable": "claude-fable-5", "opus": "claude-opus-5",
+    "haiku": "claude-haiku-4-5-20251001",
+    "sol": "gpt-5.6-sol", "terra": "gpt-5.6-terra",
+    # GPT-6 Astra: served to ChatGPT-account Codex lanes from codex CLI 0.153.0
+    # (the catalog's minimal_client_version; hidden from the interactive model
+    # picker but dispatchable; shares the "codex" weekly window).
+    "astra": "gpt-6-astra",
+}
+CODEX_MODEL_CHOICES = ("sol", "terra", "astra")
+MODEL_CHOICES = ("fable", "opus", "sol", "terra", "astra", "haiku")
+# Frontier Codex models run at the top reasoning level (Codex's own default
+# for gpt-6-astra is "low").
+CODEX_ULTRA_EFFORT_MODELS = frozenset({"sol", "astra"})
+# Retired from dispatch: Opus handles standard work and Astra hard work. The
+# alias still parses so older scripts keep working; every entry point remaps
+# it and says so on stderr.
+RETIRED_MODEL_ALIASES = {"sol": "astra"}
+RETIRED_MODEL_NOTE = (
+    "{alias} is retired from dispatch (Opus for standard work, Astra for hard "
+    "work); dispatching {replacement} instead"
+)
+# Legacy coarse classes carry no tier; these two are standard work: Opus on a
+# Claude lane, moving upward to Astra only when no Claude lane is dispatchable.
+LEGACY_STANDARD_CLASSES = frozenset({"build", "review"})
+STANDARD_UPWARD_MODEL = "astra"
+# The frontier Codex model a `-H <codex home>` pin implies when no -m is given.
+CODEX_HOME_DEFAULT_MODEL = "astra"
+# Where a Codex-defaulted class lands when the whole Codex fleet is exhausted.
+# Build and review no longer default to Codex, so only the sweep entry is
+# reachable automatically.
+CLAUDE_OVERFLOW_MODEL = {"build": "opus", "review": "opus", "sweep": "haiku"}
 PREAMBLE_WRITE = ("Standing orders: commit after every coherent step; create and maintain a committed "
                   "PROGRESS.md (state/done/next) from the start; write your final report to the output file.")
 PREAMBLE_AUDIT = "Frame this as a defensive correctness and completeness audit."
@@ -113,12 +144,29 @@ def classify(prompt: str, forced: str | None = None) -> tuple[str, dict[str, lis
     return "build", signals
 
 
+def resolve_retired_alias(model: str | None, *, stream=None) -> str | None:
+    """Map a retired alias to its replacement, announcing the swap on `stream`
+    (stderr by default). Non-retired aliases pass through unchanged."""
+    if model in RETIRED_MODEL_ALIASES:
+        replacement = RETIRED_MODEL_ALIASES[model]
+        print(
+            "delegate: " + RETIRED_MODEL_NOTE.format(alias=model, replacement=replacement),
+            file=stream or sys.stderr,
+        )
+        return replacement
+    return model
+
+
 def choose_model(task_class: str, explicit: str | None = None) -> str:
-    return explicit or {
+    if explicit:
+        return RETIRED_MODEL_ALIASES.get(explicit, explicit)
+    # Legacy coarse classes carry no tier: standard work goes to Opus; ask for
+    # `-m astra` when the work is hard.
+    return {
         "fable": "fable",
-        "review": "sol",
+        "review": "opus",
         "sweep": "terra",
-        "build": "sol",
+        "build": "opus",
     }[task_class]
 
 
@@ -274,7 +322,10 @@ def _append_decision(record: dict[str, Any]) -> None:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="subfleet run")
     p.add_argument("-t", choices=("fable", "review", "build", "sweep"))
-    p.add_argument("-m", choices=("fable", "sol", "terra", "haiku"))
+    p.add_argument("-m", choices=MODEL_CHOICES,
+                   help="exact model override (disables capacity fallback); "
+                        "astra = GPT-6 Astra on a ChatGPT-subscription Codex lane; "
+                        "sol is retired and dispatches astra")
     resources = p.add_mutually_exclusive_group()
     resources.add_argument("-a", metavar="EMAIL")
     resources.add_argument("-H", metavar="CODEX_HOME")
@@ -336,13 +387,21 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
         parser.error("-d requires -o")
     prompt = _prompt_text(args, parser)
     task_class, signals = classify(prompt, args.t)
-    model = choose_model(task_class, args.m)
+    explicit_model = resolve_retired_alias(args.m)
+    model = choose_model(task_class, explicit_model)
+    if args.H and explicit_model is None and MODEL_FAMILY[model] != "codex":
+        # A pinned Codex home with no -m: run the frontier Codex model there.
+        model = CODEX_HOME_DEFAULT_MODEL
     family = MODEL_FAMILY[model]
-    requested_family = family
+    requested_model, requested_family = model, family
     if args.a and family != "claude":
-        parser.error("-a is only valid with fable or haiku")
+        parser.error("-a is only valid with a Claude model")
     if args.H and family != "codex":
-        parser.error("-H is only valid with sol or terra")
+        parser.error(f"-H is only valid with a Codex model ({', '.join(CODEX_MODEL_CHOICES)})")
+    if args.H:
+        api_refusal = codex_side.api_lane_refusal(args.H)
+        if api_refusal:
+            parser.error(api_refusal)
     sandbox = args.s or ("workspace-write" if task_class == "build" else "read-only")
     overrides = {k: v for k, v in {"class": args.t, "model": args.m, "lane": args.a, "home": args.H, "sandbox": args.s}.items() if v is not None}
 
@@ -372,7 +431,7 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
     if (
         args.m is None
         and args.H is None
-        and family == "codex"
+        and requested_family == "codex"
         and codex_rows
         and codex_score <= 0
         and claude_score > 0
@@ -384,6 +443,37 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
             f"dispatchable headroom is {codex_score:.0f}%; routing to Claude "
             f"({claude_score:.0f}% headroom) as {model}."
         )
+
+    # Standard work (tier-less build/review) starts on Opus and may move only
+    # upward, to Astra on a Codex lane, once no Claude lane is dispatchable.
+    # Exact -m/-a/-H pins never move.
+    upward_eligible = (
+        explicit_model is None and args.a is None and args.H is None
+        and task_class in LEGACY_STANDARD_CLASSES and requested_family == "claude"
+    )
+    routing_note: str | None = None
+
+    def _codex_best_resource() -> str | None:
+        return (scores.get("codex") or {}).get("best_resource")
+
+    def _route_upward(exhausted_by: str) -> bool:
+        """Switch to the frontier Codex model when standard Claude work has no
+        lane left; returns False when the route is unavailable or already taken."""
+        nonlocal model, family, routing_note
+        if not upward_eligible or family != "claude" or routing_note is not None:
+            return False
+        if not _codex_best_resource():
+            return False
+        routing_note = (
+            f"CAPABILITY FALLBACK: {model} has no dispatchable capacity ({exhausted_by}); "
+            f"routing {task_class}/standard upward to {STANDARD_UPWARD_MODEL}"
+        )
+        model, family = STANDARD_UPWARD_MODEL, MODEL_FAMILY[STANDARD_UPWARD_MODEL]
+        print(f"delegate: WARNING {routing_note}", file=sys.stderr)
+        return True
+
+    if capacity_rows is not None and claude_score <= 0:
+        _route_upward("no dispatchable Claude lane in the capacity view")
 
     runtime_limited_lanes: list[dict[str, Any]] = []
     capacity_context = {
@@ -405,16 +495,17 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
         earliest = (scores.get("claude") or {}).get("earliest_reset")
         reason = (
             "FABLE FLOOR BLOCKED: all Claude lanes are limited or unavailable; "
-            "refusing to downgrade floor work to Sol"
+            "refusing to downgrade floor work"
             + (f" (earliest reset {earliest})" if earliest else "")
         )
         print(f"delegate: {reason}", file=sys.stderr)
         record = {
             "ts": _now().isoformat(), "class": task_class, "model": model,
-            "family": family, "requested_family": requested_family,
+            "family": family, "requested_model": requested_model,
+            "requested_family": requested_family,
             "lane/home": None, "signals matched": signals, "overrides": overrides,
-            "capacity": capacity_context, "cross_family": None, "reason": reason,
-            "result": 3, "cmd": [],
+            "capacity": capacity_context, "cross_family": None, "routing": None,
+            "reason": reason, "result": 3, "cmd": [],
         }
         _append_decision(record)
         if args.why:
@@ -452,7 +543,10 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
         if family == "codex":
             lane_or_home = args.H or (scores.get("codex") or {}).get("best_resource")
             if not lane_or_home:
-                if args.m is None and args.H is None and claude_score > 0:
+                if (
+                    args.m is None and args.H is None
+                    and requested_family == "codex" and claude_score > 0
+                ):
                     model = CLAUDE_OVERFLOW_MODEL[task_class]
                     family = "claude"
                     cross_family_note = (
@@ -479,12 +573,16 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                 else:
                     cmd = [runner, "-H", lane_or_home, "-m", MODEL_NAMES[model],
                            "-C", args.C, "-p", merged, "-o", output, "-s", sandbox]
-                    if model == "sol": cmd += ["-e", "ultra"]
+                    if model in CODEX_ULTRA_EFFORT_MODELS: cmd += ["-e", "ultra"]
                     if args.b: cmd += ["-b", args.b]
                     result = 0 if args.dry_run else subprocess.run(cmd).returncode
         else:
             lane_or_home = args.a or pick_fable_lane(tried, capacity_rows)
             if not lane_or_home or attempts >= 3:
+                if _route_upward(
+                    "retry cap reached" if attempts >= 3 else "no dispatchable Claude lane remains"
+                ):
+                    continue
                 cmd = []
                 result = 3
                 if task_class == "fable":
@@ -493,12 +591,12 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                     if attempts >= 3:
                         reason = (
                             f"FABLE FLOOR STOPPED: Claude retry cap reached after {attempts} "
-                            "unavailable lane attempts; refusing any Sol downgrade"
+                            "unavailable lane attempts; refusing any downgrade"
                         )
                     else:
                         reason = (
                             "FABLE FLOOR BLOCKED: no dispatchable Claude lane remains; "
-                            "refusing any Sol downgrade"
+                            "refusing any downgrade"
                         )
                     if earliest:
                         reason += f" (earliest reset {earliest})"
@@ -539,18 +637,23 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                                     "limited_until": cooldown_until.isoformat(),
                                 }
                             )
-                        if result in (4, 5) and not args.a and attempts < 3:
+                        if result in (4, 5) and not args.a:
                             attempt_record = {
                                 "ts": _now().isoformat(), "class": task_class, "model": model,
-                                "family": family, "requested_family": requested_family,
+                                "family": family, "requested_model": requested_model,
+                                "requested_family": requested_family,
                                 "lane/home": lane_or_home, "signals matched": signals,
                                 "overrides": overrides, "capacity": capacity_context,
-                                "cross_family": cross_family_note, "result": result, "cmd": cmd,
+                                "cross_family": cross_family_note, "routing": routing_note,
+                                "result": result, "cmd": cmd,
                             }
-                            _append_decision(attempt_record)
-                            if args.why:
-                                print("delegate decision: " + json.dumps(attempt_record, sort_keys=True), file=sys.stderr)
-                            continue
+                            # Another Claude lane while the retry cap allows; at the
+                            # cap, standard work may still move upward to Astra.
+                            if attempts < 3 or _route_upward("retry cap reached"):
+                                _append_decision(attempt_record)
+                                if args.why:
+                                    print("delegate decision: " + json.dumps(attempt_record, sort_keys=True), file=sys.stderr)
+                                continue
                         if result in (4, 5):
                             runtime_result = result
                             result = 3
@@ -560,12 +663,12 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
                                 if args.a:
                                     reason = (
                                         f"FABLE FLOOR STOPPED: pinned Claude lane became "
-                                        f"unavailable (rc {runtime_result}); refusing any Sol downgrade"
+                                        f"unavailable (rc {runtime_result}); refusing any downgrade"
                                     )
                                 else:
                                     reason = (
                                         f"FABLE FLOOR STOPPED: Claude retry cap reached after "
-                                        f"{attempts} unavailable lane attempts; refusing any Sol downgrade"
+                                        f"{attempts} unavailable lane attempts; refusing any downgrade"
                                     )
                                 if earliest:
                                     reason += f" (earliest reset {earliest})"
@@ -574,10 +677,11 @@ def _main(argv: Sequence[str] | None, temp_paths: list[str]) -> int:
             print(f"delegate: {reason}", file=sys.stderr)
         record = {
             "ts": _now().isoformat(), "class": task_class, "model": model,
-            "family": family, "requested_family": requested_family,
+            "family": family, "requested_model": requested_model,
+            "requested_family": requested_family,
             "lane/home": lane_or_home, "signals matched": signals, "overrides": overrides,
             "capacity": capacity_context, "cross_family": cross_family_note,
-            "reason": reason, "result": result, "cmd": cmd,
+            "routing": routing_note, "reason": reason, "result": result, "cmd": cmd,
         }
         _append_decision(record)
         if args.why:

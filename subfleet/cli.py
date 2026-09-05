@@ -505,6 +505,17 @@ def cmd_record_run(args) -> int:
     return 0
 
 
+def cmd_api_lane_check(args) -> int:
+    """Private: rc 7 with a message on stderr when HOME is an OpenAI API-key
+    login that lanes must not dispatch to (bin/subfleet-codex, bin/codex);
+    rc 0 when the home may run. SUBFLEET_ALLOW_API_LANE=1 overrides."""
+    refusal = codex.api_lane_refusal(args.home)
+    if refusal:
+        print(f"subfleet: {refusal}", file=sys.stderr)
+        return codex.API_LANE_REFUSED_RC
+    return 0
+
+
 def cmd_runs(args) -> int:
     if args.runs_command == "show":
         try:
@@ -625,6 +636,8 @@ def main(argv=None) -> int:
     p_secret.add_argument("email")
 
     sub.add_parser("_codex-binary", help=argparse.SUPPRESS)
+    p_api_lane = sub.add_parser("_api-lane-check", help=argparse.SUPPRESS)
+    p_api_lane.add_argument("home")
 
     p_usage = sub.add_parser("lane-usage", help=argparse.SUPPRESS)
     usage_sub = p_usage.add_subparsers(dest="action", required=True)
@@ -662,7 +675,7 @@ def main(argv=None) -> int:
     known = {
         "status", "capacity", "runs", "pick", "run", "codex", "claude", "mirror",
         "login", "errors", "watch", "brief", "enroll", "secret", "lane-usage",
-        "_codex-binary", "_record-run",
+        "_codex-binary", "_record-run", "_api-lane-check",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
@@ -703,6 +716,7 @@ def main(argv=None) -> int:
         "secret": cmd_secret,
         "lane-usage": cmd_lane_usage,
         "_codex-binary": cmd_codex_binary,
+        "_api-lane-check": cmd_api_lane_check,
         "_record-run": cmd_record_run,
     }
     return handlers[args.command](args)

@@ -23,22 +23,22 @@ from subfleet import config, delegate
     ("Design the interface", "fable", "fable"),
     ("Choose a strategy", "fable", "fable"),
     ("Wdyt about this?", "fable", "fable"),
-    ("Review this patch", "review", "sol"),
-    ("Assess this patch", "review", "sol"),
-    ("Critique this patch", "review", "sol"),
-    ("Audit this patch", "review", "sol"),
-    ("Evaluate this patch", "review", "sol"),
-    ("Referee this dispute", "review", "sol"),
+    ("Review this patch", "review", "opus"),
+    ("Assess this patch", "review", "opus"),
+    ("Critique this patch", "review", "opus"),
+    ("Audit this patch", "review", "opus"),
+    ("Evaluate this patch", "review", "opus"),
+    ("Referee this dispute", "review", "opus"),
     ("Final review before we implement the fix", "fable", "fable"),
-    ("Audit and implement the fix", "review", "sol"),
+    ("Audit and implement the fix", "review", "opus"),
     ("For each file, check imports", "sweep", "terra"),
     ("Extract ids across all rows", "sweep", "terra"),
     ("Count a batch of records", "sweep", "terra"),
-    ("For each feature implement it", "build", "sol"),
-    ("Implement the voicemail redesign launcher", "build", "sol"),
-    ("Implement the endpoint", "build", "sol"),
-    ("Fix and test the bug", "build", "sol"),
-    ("Refactor the parser", "build", "sol"),
+    ("For each feature implement it", "build", "opus"),
+    ("Implement the voicemail redesign launcher", "build", "opus"),
+    ("Implement the endpoint", "build", "opus"),
+    ("Fix and test the bug", "build", "opus"),
+    ("Refactor the parser", "build", "opus"),
 ])
 def test_routing_table(prompt, kind, model):
     got, _ = delegate.classify(prompt)
@@ -51,6 +51,13 @@ def test_overrides_and_haiku_only_explicit():
     assert (kind, delegate.choose_model(kind, "terra")) == ("build", "terra")
     assert delegate.choose_model("fable") != "haiku"
     assert delegate.choose_model("build", "haiku") == "haiku"
+    assert delegate.choose_model("review") == "opus"
+    assert delegate.choose_model("build") == "opus"
+    assert delegate.choose_model("build", "opus") == "opus"
+    assert delegate.choose_model("build", "astra") == "astra"
+    assert delegate.choose_model("build", "sol") == "astra"  # retired alias
+    assert delegate.MODEL_NAMES["opus"] == "claude-opus-5"
+    assert delegate.MODEL_NAMES["astra"] == "gpt-6-astra"
 
 
 def capacity_report(*, codex=None, claude=None, codex_score=0, claude_score=100,
@@ -80,6 +87,20 @@ def capacity_report(*, codex=None, claude=None, codex_score=0, claude_score=100,
                 "dispatchable": sum(bool(row.get("dispatchable")) for row in claude),
             },
         },
+    }
+
+
+def codex_capacity_row(home="/home/codex", *, dispatchable=True, limited_until=None):
+    return {
+        "family": "codex", "id": Path(home).name, "email": "codex@example.com",
+        "home": home, "resource": home,
+        "five_hour": {"unit": "percent", "used_percent": 20 if dispatchable else 100,
+                      "remaining_percent": 80 if dispatchable else 0,
+                      "reset_at": limited_until},
+        "weekly": {"unit": "percent", "used_percent": 30,
+                   "remaining_percent": 70, "reset_at": None},
+        "learned_capacity": None, "limited_until": limited_until, "confidence": "live",
+        "dispatchable": dispatchable, "status": "ok",
     }
 
 
@@ -164,7 +185,7 @@ def test_rc4_cooldown_rotates_and_three_attempt_cap(isolated, monkeypatch, capsy
     final = decisions[-1]
     assert "fable floor stopped" in final["reason"].lower()
     assert "retry cap" in final["reason"].lower()
-    assert "refusing any sol downgrade" in final["reason"].lower()
+    assert "refusing any downgrade" in final["reason"].lower()
     assert "all claude lanes" not in final["reason"].lower()
     runtime_limited = final["capacity"]["runtime_limited_lanes"]
     assert [row["result"] for row in runtime_limited] == [4, 4, 4]
@@ -217,10 +238,44 @@ def test_no_codex_capacity_overflows_automatically(isolated, monkeypatch, capsys
         fake_run_factory([(0, "ok", "")], calls),
     )
     out = isolated / "out"
-    assert delegate.main(["implement x", "-o", str(out)]) == 0
+    assert delegate.main(["For each file, check imports", "-o", str(out)]) == 0
     err = capsys.readouterr().err
     assert "cross-family" in err.lower()
     assert any("subfleet-claude" in cmd[0] for cmd in calls)
+
+
+def test_exhausted_codex_capacity_overflows_sweeps(isolated, monkeypatch, capsys):
+    reset = (delegate._now() + timedelta(hours=1)).isoformat()
+    codex_row = codex_capacity_row("/home/codex", dispatchable=False, limited_until=reset)
+    lane = claude_capacity_row("alpha@example.com")
+    monkeypatch.setattr(
+        delegate.capacity,
+        "build",
+        lambda: capacity_report(codex=[codex_row], claude=[lane], claude_score=100),
+    )
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append((cmd, Path(cmd[cmd.index("-p") + 1]).read_text()))
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(delegate.subprocess, "run", run)
+
+    assert delegate.main(
+        ["--why", "For each file, check imports", "-o", str(isolated / "out")]
+    ) == 0
+
+    cmd, merged_prompt = seen[0]
+    assert "subfleet-claude" in cmd[0]
+    assert cmd[cmd.index("-m") + 1] == delegate.MODEL_NAMES["haiku"]
+    assert cmd[cmd.index("-s") + 1] == "read-only"
+    assert delegate.PREAMBLE_AUDIT not in merged_prompt
+    assert "cross-family overflow" in capsys.readouterr().err.lower()
+    decision = json.loads((isolated / "decisions.jsonl").read_text().splitlines()[-1])
+    assert decision["capacity"]["scores"]["codex"]["score"] == 0
+    assert decision["capacity"]["scores"]["claude"]["score"] == 100
+    assert decision["family"] == "claude" and decision["cross_family"]
+    assert decision["requested_family"] == "codex" and decision["routing"] is None
 
 
 @pytest.mark.parametrize(
@@ -230,20 +285,14 @@ def test_no_codex_capacity_overflows_automatically(isolated, monkeypatch, capsys
         ("Audit and implement the endpoint", "read-only", True),
     ],
 )
-def test_exhausted_codex_capacity_overflows_elastic_classes(
+def test_legacy_review_and_build_start_on_opus(
     isolated, monkeypatch, capsys, prompt, expected_sandbox, audit_preamble
 ):
+    """Tier-less legacy classes are standard work: Opus on a Claude lane, with
+    the class's sandbox default, and no Codex involvement even when the Codex
+    fleet is exhausted."""
     reset = (delegate._now() + timedelta(hours=1)).isoformat()
-    codex_row = {
-        "family": "codex", "id": "codex-1", "email": "codex@example.com",
-        "home": "/home/codex", "resource": "/home/codex",
-        "five_hour": {"unit": "percent", "used_percent": 100,
-                      "remaining_percent": 0, "reset_at": reset},
-        "weekly": {"unit": "percent", "used_percent": 50,
-                   "remaining_percent": 50, "reset_at": None},
-        "learned_capacity": None, "limited_until": reset, "confidence": "live",
-        "dispatchable": False, "status": "ok",
-    }
+    codex_row = codex_capacity_row("/home/codex", dispatchable=False, limited_until=reset)
     lane = claude_capacity_row("alpha@example.com")
     monkeypatch.setattr(
         delegate.capacity,
@@ -261,15 +310,16 @@ def test_exhausted_codex_capacity_overflows_elastic_classes(
     assert delegate.main(["--why", prompt, "-o", str(isolated / "out")]) == 0
 
     cmd, merged_prompt = seen[0]
-    assert "subfleet-claude" in cmd[0]
-    assert cmd[cmd.index("-m") + 1] == delegate.MODEL_NAMES["fable"]
+    assert cmd[0].endswith("subfleet-claude")
+    assert cmd[cmd.index("-m") + 1] == "claude-opus-5"
     assert cmd[cmd.index("-s") + 1] == expected_sandbox
+    assert "-e" not in cmd
     assert (delegate.PREAMBLE_AUDIT in merged_prompt) is audit_preamble
-    assert "cross-family overflow" in capsys.readouterr().err.lower()
+    assert "CROSS-FAMILY" not in capsys.readouterr().err
     decision = json.loads((isolated / "decisions.jsonl").read_text().splitlines()[-1])
-    assert decision["capacity"]["scores"]["codex"]["score"] == 0
-    assert decision["capacity"]["scores"]["claude"]["score"] == 100
-    assert decision["family"] == "claude" and decision["cross_family"]
+    assert decision["model"] == decision["requested_model"] == "opus"
+    assert decision["family"] == decision["requested_family"] == "claude"
+    assert decision["cross_family"] is None and decision["routing"] is None
 
 
 def test_all_claude_limited_fable_floor_fails_fast(isolated, monkeypatch, capsys):
@@ -336,17 +386,275 @@ def test_preamble_defaults_off_dry_run_and_decision(isolated, monkeypatch, capsy
     out = isolated / "out"
     assert delegate.main(["implement x", "-o", str(out)]) == 0
     assert "Standing orders" in seen[0][1] and seen[0][0][seen[0][0].index("-s") + 1] == "workspace-write"
+    assert seen[0][0][0].endswith("subfleet-claude")
+    assert seen[0][0][seen[0][0].index("-m") + 1] == "claude-opus-5" and "-e" not in seen[0][0]
+    seen.clear()
+    assert delegate.main(["-m", "astra", "implement x", "-o", str(out)]) == 0
+    assert seen[0][0][0].endswith("subfleet-codex")
+    assert seen[0][0][seen[0][0].index("-m") + 1] == "gpt-6-astra"
     assert "-e" in seen[0][0] and "ultra" in seen[0][0]
     seen.clear()
     assert delegate.main(["-m", "fable", "--no-preamble", "review x", "-o", str(out)]) == 0
     assert seen[0][1] == "review x" and seen[0][0][seen[0][0].index("-s") + 1] == "read-only"
     seen.clear()
     assert delegate.main(["--dry-run", "-H", "/h", "implement x", "-o", str(out)]) == 0
-    assert not seen and "subfleet-codex" in capsys.readouterr().out
-    assert len((isolated / "decisions.jsonl").read_text().splitlines()) == 3
+    dry = capsys.readouterr().out
+    assert not seen and "subfleet-codex" in dry and "gpt-6-astra" in dry and "ultra" in dry
+    assert len((isolated / "decisions.jsonl").read_text().splitlines()) == 4
 
 
 def test_detach_requires_output():
     with pytest.raises(SystemExit) as exc:
         delegate.main(["-d", "task"])
     assert exc.value.code == 2
+
+
+def _codex_capacity(monkeypatch, *, claude=None, claude_score=100, claude_reset=None):
+    monkeypatch.setattr(
+        delegate.capacity,
+        "build",
+        lambda: capacity_report(
+            codex=[codex_capacity_row("/home/codex")], claude=claude or [],
+            codex_score=80, claude_score=claude_score, claude_reset=claude_reset,
+        ),
+    )
+
+
+def _limited_claude_lanes():
+    reset = (delegate._now() + timedelta(hours=2)).isoformat()
+    lanes = [
+        claude_capacity_row(email, dispatchable=False, limited_until=reset)
+        for email in ("alpha@example.com", "beta@example.com", "charlie@example.com",
+                      "delta@example.com")
+    ]
+    return lanes, reset
+
+
+def test_astra_alias_is_gpt6_on_a_codex_lane_at_ultra_effort(isolated, monkeypatch):
+    assert delegate.MODEL_FAMILY["astra"] == "codex"
+    assert delegate.MODEL_NAMES["astra"] == "gpt-6-astra"
+    assert "astra" in delegate.CODEX_ULTRA_EFFORT_MODELS
+    _codex_capacity(monkeypatch)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(["-m", "astra", "implement x", "-o", str(isolated / "out")]) == 0
+    command = calls[0]
+    assert command[0].endswith("subfleet-codex")
+    assert command[command.index("-H") + 1] == "/home/codex"
+    assert command[command.index("-m") + 1] == "gpt-6-astra"
+    assert command[command.index("-e") + 1] == "ultra"
+    decision = json.loads((isolated / "decisions.jsonl").read_text())
+    assert decision["overrides"]["model"] == "astra"
+    assert decision["model"] == decision["requested_model"] == "astra"
+
+
+def test_terra_is_not_forced_to_ultra_effort(isolated, monkeypatch):
+    _codex_capacity(monkeypatch)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(["-m", "terra", "implement x", "-o", str(isolated / "out")]) == 0
+    assert calls[0][calls[0].index("-m") + 1] == "gpt-5.6-terra"
+    assert "-e" not in calls[0]
+
+
+def test_retired_sol_alias_dispatches_astra_and_says_so(isolated, monkeypatch, capsys):
+    assert delegate.RETIRED_MODEL_ALIASES == {"sol": "astra"}
+    _codex_capacity(monkeypatch)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(["-m", "sol", "implement x", "-o", str(isolated / "out")]) == 0
+    command = calls[0]
+    assert command[command.index("-m") + 1] == "gpt-6-astra"
+    assert command[command.index("-e") + 1] == "ultra"
+    err = capsys.readouterr().err
+    assert "sol is retired from dispatch" in err and "dispatching astra instead" in err
+    decision = json.loads((isolated / "decisions.jsonl").read_text())
+    assert decision["overrides"]["model"] == "sol"  # what the caller asked for
+    assert decision["model"] == decision["requested_model"] == "astra"  # what ran
+
+
+def test_no_automatic_route_selects_sol():
+    for task_class in ("fable", "review", "sweep", "build"):
+        assert delegate.choose_model(task_class) != "sol"
+    assert "sol" not in delegate.CLAUDE_OVERFLOW_MODEL.values()
+    assert delegate.STANDARD_UPWARD_MODEL != "sol"
+    assert delegate.CODEX_HOME_DEFAULT_MODEL != "sol"
+
+
+def test_codex_home_pin_without_model_implies_astra(isolated, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(["-H", "/pinned", "implement x", "-o", str(isolated / "out")]) == 0
+    command = calls[0]
+    assert command[0].endswith("subfleet-codex")
+    assert command[command.index("-H") + 1] == "/pinned"
+    assert command[command.index("-m") + 1] == "gpt-6-astra"
+    assert command[command.index("-e") + 1] == "ultra"
+    assert "CROSS-FAMILY" not in capsys.readouterr().err
+    decision = json.loads((isolated / "decisions.jsonl").read_text())
+    assert decision["overrides"] == {"home": "/pinned"}
+    assert decision["model"] == decision["requested_model"] == "astra"
+
+
+def test_lane_pins_reject_the_other_family_with_all_aliases_named(isolated, capsys):
+    with pytest.raises(SystemExit) as exc:
+        delegate.main(["-H", "/pinned", "-m", "opus", "task", "-o", str(isolated / "out")])
+    assert exc.value.code == 2
+    assert "sol, terra, astra" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        delegate.main(["-a", "alpha@example.com", "-m", "astra", "task", "-o", str(isolated / "out")])
+    assert exc.value.code == 2
+    assert "-a is only valid with a Claude model" in capsys.readouterr().err
+
+
+def test_api_key_home_pin_is_refused_unless_deliberately_overridden(
+        isolated, monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("SUBFLEET_ALLOW_API_LANE", raising=False)
+    api_home = tmp_path / "codex-api"
+    api_home.mkdir()
+    (api_home / "auth.json").write_text(json.dumps({
+        "OPENAI_API_KEY": "sk-test", "auth_mode": "apikey", "tokens": None,
+    }))
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    with pytest.raises(SystemExit) as refused:
+        delegate.main(["-H", str(api_home), "-m", "astra", "implement x", "-o", str(isolated / "out")])
+    assert refused.value.code == 2
+    assert "ChatGPT subscriptions only" in capsys.readouterr().err
+    assert calls == []
+
+    monkeypatch.setenv("SUBFLEET_ALLOW_API_LANE", "1")
+    assert delegate.main([
+        "-H", str(api_home), "-m", "astra", "implement x", "-o", str(isolated / "out"),
+    ]) == 0
+    assert calls[0][calls[0].index("-H") + 1] == str(api_home)
+
+
+def test_chatgpt_home_pin_passes_the_api_guard(isolated, monkeypatch, tmp_path):
+    monkeypatch.delenv("SUBFLEET_ALLOW_API_LANE", raising=False)
+    lane = tmp_path / "codex-4"
+    lane.mkdir()
+    (lane / "auth.json").write_text(json.dumps({
+        "OPENAI_API_KEY": None, "auth_mode": "chatgpt",
+        "tokens": {"access_token": "x", "account_id": "acct"},
+    }))
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(
+        ["-H", str(lane), "-m", "astra", "implement x", "-o", str(isolated / "out")]
+    ) == 0
+    assert calls[0][calls[0].index("-H") + 1] == str(lane)
+
+
+def test_legacy_build_moves_upward_to_astra_only_when_no_claude_lane_is_dispatchable(
+        isolated, monkeypatch, capsys):
+    lanes, reset = _limited_claude_lanes()
+    _codex_capacity(monkeypatch, claude=lanes, claude_score=0, claude_reset=reset)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "", "")], calls))
+    assert delegate.main(["--why", "implement x", "-o", str(isolated / "out")]) == 0
+    err = capsys.readouterr().err
+    assert "CAPABILITY FALLBACK" in err and "build/standard upward to astra" in err
+    assert "CROSS-FAMILY" not in err
+    command = calls[0]
+    assert command[0].endswith("subfleet-codex")
+    assert command[command.index("-H") + 1] == "/home/codex"
+    assert command[command.index("-m") + 1] == "gpt-6-astra"
+    assert command[command.index("-e") + 1] == "ultra"
+    assert command[command.index("-s") + 1] == "workspace-write"
+    decision = json.loads((isolated / "decisions.jsonl").read_text().splitlines()[-1])
+    assert decision["requested_model"] == "opus" and decision["model"] == "astra"
+    assert decision["requested_family"] == "claude" and decision["family"] == "codex"
+    assert "upward to astra" in decision["routing"]
+
+
+def test_legacy_review_moves_upward_read_only_with_audit_frame(isolated, monkeypatch, capsys):
+    lanes, reset = _limited_claude_lanes()
+    _codex_capacity(monkeypatch, claude=lanes, claude_score=0, claude_reset=reset)
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append((cmd, Path(cmd[cmd.index("-p") + 1]).read_text()))
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(delegate.subprocess, "run", run)
+    assert delegate.main(["Review this patch", "-o", str(isolated / "out")]) == 0
+    assert "review/standard upward to astra" in capsys.readouterr().err
+    cmd, merged_prompt = seen[0]
+    assert cmd[0].endswith("subfleet-codex")
+    assert cmd[cmd.index("-m") + 1] == "gpt-6-astra"
+    assert cmd[cmd.index("-s") + 1] == "read-only"
+    assert delegate.PREAMBLE_AUDIT in merged_prompt
+
+
+def test_legacy_build_moves_upward_after_runtime_claude_limits(isolated, monkeypatch, capsys):
+    """Capacity said Claude was fine, but every lane answered rc 4 at dispatch
+    time: after the retry cap the work moves upward to Astra instead of failing."""
+    lanes = [
+        claude_capacity_row(email)
+        for email in ("alpha@example.com", "beta@example.com", "charlie@example.com",
+                      "delta@example.com")
+    ]
+    _codex_capacity(monkeypatch, claude=lanes)
+    calls = []
+    monkeypatch.setattr(
+        delegate.subprocess, "run",
+        fake_run_factory([(4, "", "limit resets 3:15pm")] * 3 + [(0, "", "")], calls),
+    )
+    assert delegate.main(["--why", "implement x", "-o", str(isolated / "out")]) == 0
+    assert len(calls) == 4
+    assert all(cmd[0].endswith("subfleet-claude") for cmd in calls[:3])
+    assert calls[3][0].endswith("subfleet-codex")
+    assert calls[3][calls[3].index("-m") + 1] == "gpt-6-astra"
+    err = capsys.readouterr().err
+    assert "CAPABILITY FALLBACK" in err and "retry cap reached" in err
+    decisions = [
+        json.loads(line) for line in (isolated / "decisions.jsonl").read_text().splitlines()
+    ]
+    assert [row["result"] for row in decisions] == [4, 4, 4, 0]
+    assert [row["model"] for row in decisions] == ["opus", "opus", "opus", "astra"]
+    assert decisions[-1]["requested_model"] == "opus"
+    assert [row["result"] for row in decisions[-1]["capacity"]["runtime_limited_lanes"]] == [4, 4, 4]
+    assert len(json.loads((isolated / "cooldowns.json").read_text())) == 3
+
+
+def test_legacy_build_fails_in_place_when_no_codex_lane_can_take_it(isolated, monkeypatch, capsys):
+    lanes, reset = _limited_claude_lanes()
+    monkeypatch.setattr(
+        delegate.capacity, "build",
+        lambda: capacity_report(claude=lanes, claude_score=0, claude_reset=reset),
+    )
+    monkeypatch.setattr(
+        delegate.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("no lane was dispatchable"),
+    )
+    assert delegate.main(["implement x", "-o", str(isolated / "out")]) == 3
+    err = capsys.readouterr().err
+    assert "CAPABILITY FALLBACK" not in err and "CROSS-FAMILY" not in err
+    decision = json.loads((isolated / "decisions.jsonl").read_text().splitlines()[-1])
+    assert decision["model"] == "opus" and decision["cmd"] == [] and decision["result"] == 3
+
+
+def test_fable_floor_never_moves_upward_to_astra(isolated, monkeypatch, capsys):
+    lanes, reset = _limited_claude_lanes()
+    _codex_capacity(monkeypatch, claude=lanes, claude_score=0, claude_reset=reset)
+    monkeypatch.setattr(
+        delegate.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("floor work was dispatched"),
+    )
+    assert delegate.main(["Send the final email", "-o", str(isolated / "out")]) == 3
+    err = capsys.readouterr().err
+    assert "fable floor blocked" in err.lower() and "CAPABILITY FALLBACK" not in err
+
+
+def test_pinned_claude_lane_never_moves_upward(isolated, monkeypatch, capsys):
+    _codex_capacity(monkeypatch, claude=[claude_capacity_row("alpha@example.com")])
+    calls = []
+    monkeypatch.setattr(
+        delegate.subprocess, "run", fake_run_factory([(4, "", "limit resets 3:15pm")], calls)
+    )
+    assert delegate.main(
+        ["-a", "alpha@example.com", "implement x", "-o", str(isolated / "out")]
+    ) == 3
+    assert len(calls) == 1 and calls[0][0].endswith("subfleet-claude")
+    assert "CAPABILITY FALLBACK" not in capsys.readouterr().err

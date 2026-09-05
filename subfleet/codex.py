@@ -67,6 +67,56 @@ def read_auth(home: Path) -> dict:
     }
 
 
+API_KEY_AUTH_FIELDS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+API_LANE_OVERRIDE_ENV = "SUBFLEET_ALLOW_API_LANE"
+API_LANE_REFUSED_RC = 7
+
+
+def api_key_login(home: Path | str) -> bool:
+    """True when $CODEX_HOME/auth.json is an OpenAI API-key login (metered
+    platform billing) rather than a ChatGPT-account login (subscription).
+
+    Lanes run on ChatGPT subscriptions only. `codex login --with-api-key`
+    stores the key under OPENAI_API_KEY with auth_mode "apikey" and no tokens;
+    a ChatGPT login has OPENAI_API_KEY null and auth_mode "chatgpt". Missing or
+    unreadable auth is not an API login (the picker already treats those homes
+    as undispatchable).
+    """
+    auth_file = Path(home).expanduser() / "auth.json"
+    try:
+        raw = json.loads(auth_file.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    if any(raw.get(field) for field in API_KEY_AUTH_FIELDS):
+        return True
+    mode = str(raw.get("auth_mode") or "").lower().replace("_", "").replace("-", "")
+    return mode == "apikey"
+
+
+def api_lane_allowed() -> bool:
+    """Deliberate operator override for a metered-API dispatch; subfleet never
+    sets it itself."""
+    return os.environ.get(API_LANE_OVERRIDE_ENV) == "1"
+
+
+def api_lane_refusal(home: Path | str) -> str | None:
+    """Refusal message when HOME must not be dispatched to (an API-key login
+    without the override), else None."""
+    if api_lane_allowed() or not api_key_login(home):
+        return None
+    shown = str(Path(home).expanduser())
+    home_dir = str(Path.home())
+    if shown.startswith(home_dir):
+        shown = "~" + shown[len(home_dir):]
+    return (
+        f"{shown} is an OpenAI API-key login (metered platform billing); lanes "
+        f"run on ChatGPT subscriptions only ({API_LANE_OVERRIDE_ENV}=1 overrides "
+        "deliberately)"
+    )
+
+
 def app_home_identity() -> dict:
     """Read the desktop app's current identity without exposing token fields."""
     from . import paths
