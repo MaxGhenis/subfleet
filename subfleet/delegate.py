@@ -41,6 +41,7 @@ BUILD_PATTERNS = (r"implement", r"fix", r"refactor", r"port", r"migrate", r"wire
 MODEL_FAMILY = {
     "fable": "claude", "opus": "claude", "sonnet": "claude", "haiku": "claude",
     "sol": "codex", "terra": "codex", "astra": "codex", "luna": "codex",
+    "spark": "codex",
 }
 MODEL_NAMES = {
     "fable": "claude-fable-5-1", "opus": "claude-opus-5",
@@ -58,8 +59,14 @@ MODEL_NAMES = {
     # the trivial and easy tiers route here instead of to Haiku or Sonnet,
     # which would draw a Claude account's shared weekly bucket (the 9/6 rule).
     "luna": "gpt-5.6-luna",
+    # GPT-5.3-Codex-Spark: the catalog's "ultra-fast coding model" (128k
+    # context, text only, subscription only). It meters on its OWN 5h bucket,
+    # not the weekly window, so it dispatches onto weekly-limited lanes
+    # (codex.spark_open; verified 2026-09-10). Exact `-m spark` pin only —
+    # the task/tier grid does not route here.
+    "spark": codex_side.SPARK_MODEL,
 }
-CODEX_MODEL_CHOICES = ("sol", "terra", "astra", "luna")
+CODEX_MODEL_CHOICES = ("sol", "terra", "astra", "luna", "spark")
 # Frontier Codex models run at the top reasoning level (Codex's own default
 # for gpt-6-astra is "low").
 CODEX_ULTRA_EFFORT_MODELS = frozenset({"sol", "astra"})
@@ -334,9 +341,10 @@ def _parser() -> argparse.ArgumentParser:
                       help="semantic task type; requires --tier")
     p.add_argument("--tier", choices=TIERS,
                    help="minimum capability for --task")
-    p.add_argument("-m", choices=("fable", "opus", "sonnet", "sol", "terra", "astra", "haiku", "luna"),
+    p.add_argument("-m", choices=("fable", "opus", "sonnet", "sol", "terra", "astra", "haiku", "luna", "spark"),
                    help="exact model override (disables capacity fallback); "
                         "astra = GPT-6 Astra on a ChatGPT-subscription Codex lane; "
+                        "spark = GPT-5.3-Codex-Spark on its own 5h bucket (weekly-limited lanes qualify); "
                         "sol is retired and dispatches astra")
     resources = p.add_mutually_exclusive_group()
     resources.add_argument("-a", metavar="EMAIL")
@@ -516,8 +524,27 @@ def _blind_lane_filter(rows: list[dict[str, Any]], model_family: str,
 def _capacity_candidates(data: dict[str, Any], family: str,
                          exclude: set[str] | None = None, *,
                          model_family: str | None = None,
-                         probe_blind: bool = True) -> list[dict[str, Any]]:
+                         probe_blind: bool = True,
+                         codex_model: str | None = None) -> list[dict[str, Any]]:
     exclude = exclude or set()
+    if family == "codex" and codex_side.is_spark_model(MODEL_NAMES.get(codex_model, codex_model)):
+        # Spark meters on its own 5h bucket: admit by `spark_dispatchable`
+        # (capacity._probe_codex_rows) regardless of the weekly verdict, skip
+        # the account-wide cooldown (it tracks weekly/short-window limits of
+        # the shared models), and spread across buckets — lowest Spark usage
+        # first — because each is a rolling 5h window, not a perishable week.
+        spark_rows = [
+            row for row in data.get("accounts", [])
+            if row.get("family") == "codex" and row.get("spark_dispatchable")
+            and str(row.get("id")) not in exclude
+        ]
+        spark_rows.sort(
+            key=lambda row: (
+                float((row.get("spark") or {}).get("used_percent") or 0.0),
+                str(row.get("id") or ""),
+            )
+        )
+        return spark_rows
     rows = [
         row for row in data.get("accounts", [])
         if row.get("family") == family and row.get("dispatchable")
@@ -689,6 +716,8 @@ def _model_capacity_state(data: dict[str, Any], model: str) -> bool | None:
     """Return True/False for known capacity, or None when telemetry is inconclusive."""
     family = MODEL_FAMILY[model]
     if family == "codex":
+        if model == "spark":
+            return bool(_capacity_candidates(data, "codex", codex_model=model))
         if _capacity_candidates(data, "codex"):
             return True
     else:
@@ -922,6 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if (
         family == "codex"
+        and model != "spark"
         and args.H is None
         and not _capacity_candidates(capacity_data, "codex")
         and has_applicable_reset
@@ -934,6 +964,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         task_class in {"build", "review", "sweep"}
         and family == "codex"
+        and model != "spark"
         and not family_is_pinned
         and elastic_cross_family
         and reset_picked_home is None
@@ -1204,7 +1235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     while True:
         lane_or_home: str | None
         if family == "codex":
-            candidates = _capacity_candidates(capacity_data, "codex")
+            candidates = _capacity_candidates(capacity_data, "codex", codex_model=model)
             lane_or_home = args.H or reset_picked_home or (
                 str(candidates[0]["id"]) if candidates else None
             )

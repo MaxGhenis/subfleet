@@ -2,6 +2,7 @@
 
 from . import capacity_expiry
 from .claude import LIVE_STALE_AFTER_MIN
+from .codex import spark_bucket
 from .snapshot import has_applicable_reset_credit, limited_reset_credit_homes
 from .util import fmt_clock, now_local, parse_iso
 
@@ -20,6 +21,14 @@ def _pct(w: dict | None) -> str:
     if not w or w.get("used_percent") is None:
         return "-"
     return f"{round(float(w['used_percent']))}%"
+
+
+def _spark_pct(probe: dict | None) -> str:
+    """Spark 5h bucket usage, blank when wham reports no such bucket."""
+    bucket = spark_bucket(probe) or {}
+    if bucket.get("used_percent") is None:
+        return ""
+    return f"{round(float(bucket['used_percent']))}%"
 
 
 def _reset_or_dash(w: dict | None, now) -> str:
@@ -124,7 +133,7 @@ def table(snap: dict) -> str:
     lines = [f"AI quota — {now.strftime('%Y-%m-%d %-I:%M%p %Z').lower()}", ""]
     lines.append("CODEX (ChatGPT accounts, one per CODEX_HOME)")
     header = (f"  {'home':<11} {'account':<26} {'5h':>5} {'resets':<14}"
-              f" {'week':>5} {'resets':<14} {'burn %/h 6/24':>15}  status")
+              f" {'week':>5} {'resets':<14} {'spark5h':>7} {'burn %/h 6/24':>15}  status")
     lines.append(header)
     for e in snap["codex"]["homes"]:
         w = e["windows"]
@@ -147,7 +156,8 @@ def table(snap: dict) -> str:
         lines.append(
             f"  {_short_home(e['home']):<11} {acct:<26} {_pct(w.get('five_hour')):>5}"
             f" {_reset_or_dash(w.get('five_hour'), now):<14} {_pct(w.get('weekly')):>5}"
-            f" {_reset_or_dash(w.get('weekly'), now):<14} {_burn_label(lane_expiry):>15}"
+            f" {_reset_or_dash(w.get('weekly'), now):<14} {_spark_pct(e.get('probe')):>7}"
+            f" {_burn_label(lane_expiry):>15}"
             f"  {label}{src}"
         )
         for err in e["recent_errors"]["usage_limit"][:1]:
@@ -178,6 +188,8 @@ def table(snap: dict) -> str:
         fleet_line += f" · best: {_short_home(best)}"
     if fleet.get("earliest_reset"):
         fleet_line += f" · earliest reset: {fmt_clock(parse_iso(fleet['earliest_reset']), now)}"
+    if fleet.get("spark_open") is not None:
+        fleet_line += f" · spark open: {fleet['spark_open']}/{fleet['total_homes']}"
     reset_holders = limited_reset_credit_homes(snap["codex"]["homes"])
     if reset_holders:
         fleet_line += f" · resets available: {len(reset_holders)}"

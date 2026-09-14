@@ -1712,3 +1712,41 @@ def test_luna_moves_upward_to_opus_when_codex_is_exhausted(
     assert decision["model"] == "opus"
     assert decision["routing_capacity_states"]["luna"] is False
     assert "CAPABILITY FALLBACK" in capsys.readouterr().err
+
+
+def _spark_row(account, *, weekly_ok, spark_used, spark_open=True, score=80.0):
+    row = capacity_row("codex", account, score=score, dispatchable=weekly_ok)
+    row["spark"] = (
+        {"used_percent": spark_used, "window_seconds": 18000, "reset_at": None,
+         "limit_reached": False}
+        if spark_used is not None else None
+    )
+    row["spark_dispatchable"] = bool(spark_open and spark_used is not None)
+    return row
+
+
+def test_spark_alias_is_a_codex_model():
+    assert delegate.MODEL_FAMILY["spark"] == "codex"
+    assert delegate.MODEL_NAMES["spark"] == "gpt-5.3-codex-spark"
+    assert "spark" in delegate.CODEX_MODEL_CHOICES
+    assert delegate.choose_model("build", "spark") == "spark"
+
+
+def test_codex_capacity_candidates_for_spark_admit_weekly_limited_lanes():
+    limited = _spark_row("/limited", weekly_ok=False, spark_used=12)
+    fresh = _spark_row("/fresh", weekly_ok=True, spark_used=30, score=90)
+    no_bucket = _spark_row("/nobucket", weekly_ok=True, spark_used=None, score=95)
+    data = {"accounts": [no_bucket, fresh, limited]}
+
+    spark = delegate._capacity_candidates(data, "codex", codex_model="spark")
+    assert [row["id"] for row in spark] == ["/limited", "/fresh"]
+    # The full model id selects the same bucket; an exclusion still applies.
+    assert [row["id"] for row in delegate._capacity_candidates(
+        data, "codex", {"/limited"}, codex_model="gpt-5.3-codex-spark"
+    )] == ["/fresh"]
+    # The weekly path is untouched: limited stays out, the bucket-less lane stays in.
+    assert [row["id"] for row in delegate._capacity_candidates(data, "codex")] == [
+        "/nobucket", "/fresh"
+    ]
+    assert delegate._model_capacity_state(data, "spark") is True
+    assert delegate._model_capacity_state({"accounts": [no_bucket]}, "spark") is False

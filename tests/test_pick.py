@@ -1,8 +1,9 @@
+import argparse
 import json
 from datetime import timedelta
 
 from subfleet import capacity, delegate, paths
-from subfleet.snapshot import rank_for_dispatch
+from subfleet.snapshot import rank_for_dispatch, rank_for_spark
 from subfleet.util import now_local
 
 
@@ -235,3 +236,115 @@ class TestProtectedAccountMetadata:
         ])
         assert ranked[0]["home"] == "/h/.codex"
         assert ranked[0]["protected"] is True
+
+
+def spark_entry(home, spark_used, *, verdict="limited", account="a", weekly=100,
+                limit_reached=None, spark_limit=False, probe_status="ok",
+                spark_reset=None, duplicate_of=None):
+    """A lane entry whose wham probe carries the GPT-5.3-Codex-Spark bucket
+    (`spark_used=None` → no bucket reported). Weekly-LIMITED by default: the
+    point of the bucket is that it admits work the weekly window refuses."""
+    e = entry(home, 0, weekly=weekly, verdict=verdict, account=account,
+              duplicate_of=duplicate_of,
+              limit_reached=(verdict == "limited") if limit_reached is None else limit_reached)
+    e["probe"]["status"] = probe_status
+    e["probe"]["plan_type"] = "pro"
+    if spark_used is not None:
+        e["probe"]["additional"] = [{
+            "name": "GPT-5.3-Codex-Spark",
+            "limit_reached": spark_limit,
+            "primary": {"used_percent": spark_used, "window_seconds": 18000,
+                        "reset_at": spark_reset},
+        }]
+    return e
+
+
+def _snap(homes):
+    n_ok = sum(1 for e in homes if e["verdict"] == "ok" and not e.get("duplicate_of"))
+    return {
+        "generated_at": now_local().isoformat(timespec="seconds"),
+        "codex": {
+            "homes": homes, "duplicates": [],
+            "fleet": {"total_homes": len(homes), "dispatchable_now": n_ok,
+                      "best_home": None, "earliest_reset": None},
+        },
+    }
+
+
+class TestSparkRanking:
+    def test_weekly_limited_lane_with_open_spark_bucket_qualifies(self, env_paths):
+        ranked = rank_for_spark([spark_entry("/h/.codex-1", 3)])
+        assert [r["home"] for r in ranked] == ["/h/.codex-1"]
+        assert ranked[0]["bucket"] == "spark"
+        assert ranked[0]["model"] == "gpt-5.3-codex-spark"
+        assert ranked[0]["weekly_verdict"] == "limited"
+        assert ranked[0]["spark_used_percent"] == 3.0
+
+    def test_spread_lowest_spark_usage_first(self, env_paths):
+        ranked = rank_for_spark([
+            spark_entry("/h/.codex-1", 40, account="a"),
+            spark_entry("/h/.codex-2", 10, account="b", verdict="ok", weekly=20),
+            spark_entry("/h/.codex-3", 25, account="c"),
+        ])
+        assert [r["home"] for r in ranked] == ["/h/.codex-2", "/h/.codex-3", "/h/.codex-1"]
+
+    def test_excludes_missing_bucket_limit_reached_floor_duplicates_and_auth_trouble(
+            self, env_paths):
+        ranked = rank_for_spark([
+            spark_entry("/h/.codex-1", None, account="a"),                  # no bucket
+            spark_entry("/h/.codex-2", 0, account="b", spark_limit=True),   # bucket at limit
+            spark_entry("/h/.codex-3", 97, account="c"),                    # below headroom floor
+            spark_entry("/h/.codex-4", 1, account="d", duplicate_of="/h/.codex-9"),
+            spark_entry("/h/.codex-5", 1, account="e", verdict="auth-revoked",
+                        probe_status="token-revoked"),
+            spark_entry("/h/.codex-6", 1, account="f"),
+        ])
+        assert [r["home"] for r in ranked] == ["/h/.codex-6"]
+
+    def test_weekly_waterfall_is_unchanged_by_the_bucket(self, env_paths):
+        assert rank_for_dispatch([spark_entry("/h/.codex-1", 3)]) == []
+
+
+class TestPickSparkCli:
+    def _args(self, **kw):
+        base = dict(family="codex", model="spark", json=False, all=False, cached=True,
+                    min_headroom=None, handicap=10.0, no_handicap=False, exclude=[])
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_prints_the_least_used_spark_bucket(self, env_paths, monkeypatch, capsys):
+        from subfleet import cli
+        homes = [spark_entry("/h/.codex-1", 30, account="a"),
+                 spark_entry("/h/.codex-2", 5, account="b")]
+        monkeypatch.setattr(cli, "_load_snapshot", lambda cached: _snap(homes))
+        assert cli.cmd_pick(self._args()) == 0
+        out, err = capsys.readouterr()
+        assert out.strip() == "/h/.codex-2"
+        assert "spark 5h 5% used" in err and "(limited)" in err
+
+    def test_json_reports_bucket_ranking_and_exclusions(self, env_paths, monkeypatch, capsys):
+        from subfleet import cli
+        homes = [spark_entry("/h/.codex-1", 30, account="a"),
+                 spark_entry("/h/.codex-2", 0, account="b", spark_limit=True)]
+        monkeypatch.setattr(cli, "_load_snapshot", lambda cached: _snap(homes))
+        assert cli.cmd_pick(self._args(json=True, all=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["bucket"] == "spark" and data["model"] == "gpt-5.3-codex-spark"
+        assert data["best"] == "/h/.codex-1"
+        assert [r["home"] for r in data["ranked"]] == ["/h/.codex-1"]
+        assert data["excluded"][0]["home"] == "/h/.codex-2"
+        assert data["excluded"][0]["spark"]["limit_reached"] is True
+
+    def test_rc1_when_no_bucket_is_open(self, env_paths, monkeypatch, capsys):
+        from subfleet import cli
+        homes = [spark_entry("/h/.codex-1", 0, account="a", spark_limit=True)]
+        monkeypatch.setattr(cli, "_load_snapshot", lambda cached: _snap(homes))
+        assert cli.cmd_pick(self._args()) == 1
+        assert "no codex home with an open Spark 5h bucket" in capsys.readouterr().err
+
+    def test_full_model_id_also_selects_the_bucket(self, env_paths, monkeypatch, capsys):
+        from subfleet import cli
+        homes = [spark_entry("/h/.codex-1", 2, account="a")]
+        monkeypatch.setattr(cli, "_load_snapshot", lambda cached: _snap(homes))
+        assert cli.cmd_pick(self._args(model="gpt-5.3-codex-spark")) == 0
+        assert capsys.readouterr().out.strip() == "/h/.codex-1"

@@ -376,7 +376,62 @@ def codex_fleet(home_entries: list[dict], now) -> dict:
         "best_home": dispatchable[0]["home"] if dispatchable else None,
         "earliest_reset": iso(min(future_resets)) if future_resets else None,
         "resets_available": len(limited_reset_credit_homes(home_entries)),
+        "spark_open": len(rank_for_spark(home_entries, now=now)),
     }
+
+
+def rank_for_spark(home_entries: list[dict], min_headroom: float = DEFAULT_MIN_HEADROOM,
+                   now=None) -> list[dict]:
+    """Order homes whose GPT-5.3-Codex-Spark 5h bucket admits work.
+
+    Spark meters on its own 5-hour bucket (codex.spark_open), so a
+    weekly-LIMITED lane still qualifies; only auth trouble, a missing bucket,
+    a bucket at its limit, or a duplicate account excludes a home. Buckets
+    are rolling 5h windows, so spread rather than waterfall: lowest Spark
+    usage first, then the soonest Spark reset."""
+    now = now or now_local()
+    in_flight = run_ledger.in_flight_counts()
+    candidates = []
+    for e in home_entries:
+        if e.get("duplicate_of"):
+            continue
+        if e.get("verdict") not in ("ok", "limited"):
+            continue
+        probe = e.get("probe") or {}
+        if not codex.spark_open(probe, min_headroom):
+            continue
+        bucket = codex.spark_bucket(probe) or {}
+        used = float(bucket["used_percent"]) if bucket.get("used_percent") is not None else 0.0
+        windows = e.get("windows") or {}
+        weekly = windows.get("weekly") or windows.get("secondary") or {}
+        candidates.append(
+            {
+                "home": e["home"],
+                "account_id": e.get("account_id"),
+                "email": e.get("email"),
+                "bucket": "spark",
+                "model": codex.SPARK_MODEL,
+                "spark_used_percent": used,
+                "spark_reset_at": bucket.get("reset_at"),
+                "weekly_used_percent": (
+                    float(weekly["used_percent"])
+                    if weekly.get("used_percent") is not None else 0.0
+                ),
+                "weekly_verdict": e.get("verdict"),
+                "headroom_score": round(100.0 - used, 2),
+                "in_flight": in_flight.get(("codex", str(e["home"])), 0),
+                "as_of": windows.get("as_of"),
+            }
+        )
+    candidates.sort(
+        key=lambda c: (
+            c["spark_used_percent"],
+            c["spark_reset_at"] is None,
+            parse_iso(c["spark_reset_at"]) or datetime.max.replace(tzinfo=now.tzinfo),
+            c["home"],
+        )
+    )
+    return candidates
 
 
 def has_applicable_reset_credit(entry: dict) -> bool:

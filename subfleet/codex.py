@@ -55,6 +55,58 @@ REVOKED_RE = re.compile(r"refresh token was revoked", re.IGNORECASE)
 # heal-able, because any real CLI call refreshes it — see refresh_via_cli.
 TOKEN_EXPIRED_RE = re.compile(r"token (?:is |has )?expired|token_expired", re.IGNORECASE)
 
+# GPT-5.3-Codex-Spark (catalog: "Ultra-fast coding model", 128k context,
+# subscription only) meters against its OWN 5-hour bucket, reported by wham
+# under additional_rate_limits, and is admitted even when the account's weekly
+# window is exhausted (verified 2026-09-10 on two 100%-weekly lanes: Spark ran,
+# Astra was refused). ~5.5k tokens ≈ 1% → roughly 550k Spark tokens per lane
+# per 5h window. Luna and Astra share the weekly window; Spark does not.
+SPARK_MODEL = "gpt-5.3-codex-spark"
+SPARK_BUCKET_NAME = "GPT-5.3-Codex-Spark"
+SPARK_ALIASES = frozenset({"spark", SPARK_MODEL})
+
+
+def is_spark_model(model) -> bool:
+    """True for the `spark` alias or the full gpt-5.3-codex-spark id."""
+    return str(model or "").strip().lower() in SPARK_ALIASES
+
+
+def spark_bucket(probe) -> dict | None:
+    """The Spark 5h bucket from a wham probe, or None when not reported."""
+    if not isinstance(probe, dict):
+        return None
+    for extra in probe.get("additional") or []:
+        if not isinstance(extra, dict) or extra.get("name") != SPARK_BUCKET_NAME:
+            continue
+        window = extra.get("primary") if isinstance(extra.get("primary"), dict) else {}
+        return {
+            "used_percent": window.get("used_percent"),
+            "window_seconds": window.get("window_seconds"),
+            "reset_at": window.get("reset_at"),
+            "limit_reached": extra.get("limit_reached") is True,
+        }
+    return None
+
+
+def spark_open(probe, min_headroom: float = 5.0) -> bool:
+    """Whether the Spark bucket admits work: probe ok, paid plan, bucket
+    present, not limit-reached, headroom above the floor. Deliberately
+    independent of the weekly verdict — a LIMITED lane can be Spark-open."""
+    if not isinstance(probe, dict) or probe.get("status") != "ok":
+        return False
+    if plan_is_free(probe.get("plan_type")):
+        return False
+    bucket = spark_bucket(probe)
+    if not bucket or bucket["limit_reached"]:
+        return False
+    used = bucket.get("used_percent")
+    if used is None:
+        return True
+    try:
+        return float(used) <= 100.0 - float(min_headroom)
+    except (TypeError, ValueError):
+        return False
+
 
 def read_auth(home: Path) -> dict:
     """Parse $CODEX_HOME/auth.json. The access token is returned under a private

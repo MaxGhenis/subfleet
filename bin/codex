@@ -37,7 +37,15 @@ fi
 case "${1:-}" in
   exec|e|review)
     if [ -z "${CODEX_HOME:-}" ] && [ -z "${SUBFLEET_NO_AUTOPICK:-}" ] && [ -x "$HOME/bin/subfleet" ]; then
-      pick="$("$HOME/bin/subfleet" pick codex)" || pick=""
+      # -m spark / gpt-5.3-codex-spark meters on its own 5h bucket: pick by it.
+      pick_args=""; prev=""
+      for a in "$@"; do
+        case "$prev" in -m|--model) case "$a" in spark|gpt-5.3-codex-spark) pick_args="--model spark" ;; esac ;; esac
+        case "$a" in -m=spark|--model=spark|-m=gpt-5.3-codex-spark|--model=gpt-5.3-codex-spark) pick_args="--model spark" ;; esac
+        prev="$a"
+      done
+      # shellcheck disable=SC2086
+      pick="$("$HOME/bin/subfleet" pick codex $pick_args)" || pick=""
       if [ -n "$pick" ] && [ -d "$pick" ]; then
         export CODEX_HOME="$pick"
         echo "codex-shim: CODEX_HOME unset -> $pick (reset-order waterfall; export CODEX_HOME or SUBFLEET_NO_AUTOPICK=1 to opt out)" >&2

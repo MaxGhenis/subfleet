@@ -260,7 +260,15 @@ unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG
       SUBFLEET_CODEX_DETACHED
 
 CODEX_PICK_BIN=${SUBFLEET_CODEX_PICK:-}
-[ -n "$CODEX_PICK_BIN" ] || CODEX_PICK_BIN="$HERE0/subfleet pick codex"
+if [ -z "$CODEX_PICK_BIN" ]; then
+  CODEX_PICK_BIN="$HERE0/subfleet pick codex"
+  # GPT-5.3-Codex-Spark meters on its own 5h bucket (subfleet.codex.spark_open):
+  # rank by that bucket so weekly-limited lanes stay usable for Spark work,
+  # both for the initial pick and for every -A re-pick after a usage limit.
+  case "$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')" in
+    spark|gpt-5.3-codex-spark) CODEX_PICK_BIN="$CODEX_PICK_BIN --model spark" ;;
+  esac
+fi
 if [ -z "$CODEX_HOME_ARG" ]; then
   CODEX_HOME_ARG=$($CODEX_PICK_BIN) || { echo "subfleet codex: no dispatchable lane (pick rc=$?)" >&2; exit 1; }
   [ -n "$CODEX_HOME_ARG" ] || { echo "subfleet codex: pick returned nothing" >&2; exit 1; }

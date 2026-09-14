@@ -110,8 +110,54 @@ def cmd_reserve(args) -> int:
     return 0
 
 
+def _pick_spark(args, snap: dict) -> int:
+    """`pick codex --model spark`: rank by the GPT-5.3-Codex-Spark 5h bucket,
+    which meters separately from the weekly window, so weekly-limited lanes
+    qualify. No reset-credit redemption here: a Spark shortfall is a 5h wait."""
+    min_headroom = (
+        args.min_headroom if getattr(args, "min_headroom", None) is not None
+        else snapshot.DEFAULT_MIN_HEADROOM
+    )
+    ranked = snapshot.rank_for_spark(snap["codex"]["homes"], min_headroom=min_headroom)
+    if args.json:
+        chosen = {r["home"] for r in ranked}
+        out = {
+            "generated_at": snap["generated_at"],
+            "bucket": "spark",
+            "model": codex.SPARK_MODEL,
+            "best": ranked[0]["home"] if ranked else None,
+            "ranked": ranked if args.all else ranked[:1],
+            "excluded": [
+                {
+                    "home": e["home"],
+                    "verdict": e["verdict"],
+                    "duplicate_of": e.get("duplicate_of"),
+                    "spark": codex.spark_bucket(e.get("probe")),
+                }
+                for e in snap["codex"]["homes"]
+                if e["home"] not in chosen
+            ],
+        }
+        print(json.dumps(out, indent=1))
+        return 0 if ranked else 1
+    if not ranked:
+        print("subfleet pick: no codex home with an open Spark 5h bucket", file=sys.stderr)
+        return 1
+    best = ranked[0]
+    print(best["home"])
+    print(
+        f"  {best.get('email') or best.get('account_id', '?')} · spark 5h"
+        f" {best['spark_used_percent']:.0f}% used · week {best['weekly_used_percent']:.0f}%"
+        f" ({best['weekly_verdict']})",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_pick(args, opener=None, sleep_fn=None, policy_fn=None) -> int:
     snap = _load_snapshot(args.cached)
+    if codex.is_spark_model(getattr(args, "model", None)):
+        return _pick_spark(args, snap)
     handicap = 0.0 if args.no_handicap else args.handicap
     ranked = snapshot.rank_for_dispatch(
         snap["codex"]["homes"], handicap=handicap, min_headroom=args.min_headroom
@@ -1489,7 +1535,9 @@ def main(argv=None) -> int:
     p_pick.add_argument("family", nargs="?", choices=["codex", "claude"], default="codex")
     p_pick.add_argument(
         "--model", metavar="MODEL",
-        help="Claude-only model scope (fable/opus/sonnet/haiku or a full model id)",
+        help="model scope: claude → fable/opus/sonnet/haiku or a full model id; "
+             "codex → `spark` ranks by the GPT-5.3-Codex-Spark 5h bucket "
+             "(weekly-limited lanes qualify)",
     )
     p_pick.add_argument("--json", action="store_true")
     p_pick.add_argument("--all", action="store_true", help="show full ranking")

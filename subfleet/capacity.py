@@ -802,6 +802,13 @@ def _probe_codex_rows(timeout: float, now: datetime) -> list[dict]:
                 "probe_status": probe_status,
                 "limit_reached": probe.get("limit_reached") is True,
                 "recent_errors": recent_errors,
+                # Spark meters on its own 5h bucket (codex.spark_open): a
+                # weekly-LIMITED lane can still be Spark-dispatchable.
+                "spark": codex.spark_bucket(probe),
+                "spark_dispatchable": (
+                    auth.get("status") == "ok"
+                    and codex.spark_open(probe, DEFAULT_MIN_HEADROOM)
+                ),
             }
         rows.append(_apply_codex_dynamic_gate(row, now))
     return rows
