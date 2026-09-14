@@ -23,6 +23,7 @@
   subfleet revive [--model M] [--no-fallback] [--max N] [--dry-run]  # resume cold interrupted sessions
   subfleet login codex <N|app>   # stage a lane (re)login: server, OAuth tab, watcher — Max clicks
   subfleet reset codex <N|all>   # safely consume gifted reset credits on LIMITED lanes
+subfleet touch codex [N|all]   # start idle lanes' weekly clocks (windows start on first use)
   subfleet enroll <email>        # store a Claude setup-token
   subfleet mirror [--quiet]      # desktop session mirror pass (launchd every 60s)
   subfleet errors --hours 48     # observed limit/auth errors, both providers
@@ -57,7 +58,7 @@ from . import (
     tickle,
     watchdog,
 )
-from .util import load_json, now_local, strip_private
+from .util import atomic_write_json, load_json, now_local, strip_private
 
 
 def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
@@ -1130,6 +1131,45 @@ def _print_policy_decision(decision: dict) -> None:
         )
 
 
+def cmd_touch_codex(args) -> int:
+    """Start the weekly clock on unstarted Codex lanes (windows start on first
+    use; an idle lane's next reset slides a day per idle day). No target or
+    `all` → every lane whose window has not started; `N` → that lane, touched
+    even if its window looks started."""
+    snap = snapshot.build(live=True, errors_hours=6)
+    target = getattr(args, "target", None)
+    only = None
+    force = False
+    if target and target != "all":
+        wanted = _reset_target_homes(target)
+        if not wanted:
+            print(f"subfleet touch codex: lane {target!r} is not in the configured fleet",
+                  file=sys.stderr)
+            return 2
+        only, force = {str(h) for h in wanted}, True
+    unstarted = snap["codex"]["fleet"].get("unstarted") or []
+    events = watchdog.touch_unstarted_codex_windows(
+        snap, dry_run=args.dry_run, only=only, force=force
+    )
+    if getattr(args, "json", False):
+        print(json.dumps({"generated_at": snap["generated_at"], "unstarted": unstarted,
+                          "events": events}, indent=1))
+    elif not events:
+        print("subfleet touch codex: every lane's weekly clock is already running"
+              if not unstarted else
+              "subfleet touch codex: nothing touched (recent attempt pending; see state/subfleet/window-touch.json)")
+    else:
+        for ev in events:
+            lane = ev["home"].replace(str(Path.home()), "~")
+            when = ev.get("weekly_reset_at")
+            print(f"{lane}: {ev['result']}"
+                  + (f" · weekly reset now {when}" if when else "")
+                  + (f" ({ev['detail']})" if ev.get("detail") else ""))
+    if not args.dry_run:
+        atomic_write_json(paths.snapshot_path(), snap)
+    return 1 if any(ev["result"] in ("failed", "revoked") for ev in events) else 0
+
+
 def cmd_reset_codex(args, opener=None) -> int:
     """Consume gifted Codex resets only after both live safety gates pass."""
     if getattr(args, "policy", False):
@@ -1536,6 +1576,19 @@ def main(argv=None) -> int:
         "--dry-run", action="store_true", help="list eligible credits without consuming"
     )
 
+    p_touch = sub.add_parser(
+        "touch", help="start the weekly clock on idle Codex lanes (windows start on first use)"
+    )
+    touch_sub = p_touch.add_subparsers(dest="touch_family", required=True)
+    p_touch_codex = touch_sub.add_parser(
+        "codex", help="touch every unstarted lane (default/all) or one lane N unconditionally"
+    )
+    p_touch_codex.add_argument(
+        "target", nargs="?", choices=[*(str(i) for i in range(1, 10)), "all"]
+    )
+    p_touch_codex.add_argument("--dry-run", action="store_true")
+    p_touch_codex.add_argument("--json", action="store_true")
+
     p_errors = sub.add_parser("errors", help="observed limit/auth errors")
     p_errors.add_argument("--hours", type=float, default=24)
     p_errors.add_argument("--json", action="store_true")
@@ -1597,7 +1650,7 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     known = {
         "status", "capacity", "reserve", "runs", "pick", "run", "codex", "claude", "mirror", "login",
-        "errors", "watch", "keepalive", "brief", "enroll", "reset", "_record-lane-run", "_record-run",
+        "errors", "watch", "keepalive", "brief", "enroll", "reset", "touch", "_record-lane-run", "_record-run",
         "_canonical-model", "_api-lane-check",
         "_record-codex-cooldown", "wait", "kill", "sessions", "notify", "hooks", "_session-hook",
         "_tickle", "tickle", "muster", "revive", "resume-codex", "handoff", "gate",
@@ -1629,6 +1682,7 @@ def main(argv=None) -> int:
         "runs": cmd_runs,
         "login": cmd_login,
         "reset": cmd_reset_codex,
+        "touch": cmd_touch_codex,
         "errors": cmd_errors,
         "watch": cmd_watch,
         "keepalive": cmd_keepalive,

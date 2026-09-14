@@ -55,6 +55,54 @@ REVOKED_RE = re.compile(r"refresh token was revoked", re.IGNORECASE)
 # heal-able, because any real CLI call refreshes it — see refresh_via_cli.
 TOKEN_EXPIRED_RE = re.compile(r"token (?:is |has )?expired|token_expired", re.IGNORECASE)
 
+# A Codex weekly window starts on the FIRST real request, not at the reset:
+# wham reports an unstarted window as 0% with `reset_at` sliding at (probe
+# time + window length). Every idle day after a global reset pushes that
+# lane's next reset back a day, and with the fleet burning a week in ~48h the
+# next reset is the binding constraint (Max 2026-09-14: "if you know the reset
+# starts when using it, we should touch it immediately"). The touch is one
+# tiny weekly-window turn; Spark meters on its own bucket and does NOT start
+# the clock, so Luna — the cheapest weekly model — is the touch model.
+TOUCH_MODEL = "gpt-5.6-luna"
+WINDOW_UNSTARTED_TOLERANCE_S = 600.0
+
+
+def _weekly_window(probe: dict) -> dict | None:
+    for key in ("weekly", "primary", "secondary"):
+        window = probe.get(key)
+        if isinstance(window, dict) and isinstance(window.get("window_seconds"), (int, float)) \
+                and window["window_seconds"] >= 86400:
+            return window
+    return None
+
+
+def window_unstarted(probe, now=None, tolerance_s: float = WINDOW_UNSTARTED_TOLERANCE_S) -> bool:
+    """True when the lane's weekly window has not started: 0% used and
+    `reset_at` ≈ probe time + window length (it slides with every probe)."""
+    if not isinstance(probe, dict) or probe.get("status") != "ok":
+        return False
+    if probe.get("limit_reached") or probe.get("allowed") is False:
+        return False
+    window = _weekly_window(probe)
+    if window is None:
+        return False
+    used = window.get("used_percent")
+    if used is not None and float(used) != 0.0:
+        return False
+    reset = parse_iso(window.get("reset_at"))
+    if reset is None:
+        return False
+    checked = parse_iso(probe.get("checked_at")) or now or now_local()
+    expected = checked + timedelta(seconds=float(window["window_seconds"]))
+    return abs((reset - expected).total_seconds()) <= tolerance_s
+
+
+def touch_window(home: Path | str, model: str = TOUCH_MODEL, timeout: float = 300.0,
+                 runner=subprocess.run) -> dict:
+    """Start a lane's weekly clock with one tiny weekly-model turn (same recipe
+    as the expired-token heal). Returns refresh_via_cli's status dict."""
+    return refresh_via_cli(home, model=model, timeout=timeout, runner=runner)
+
 
 def read_auth(home: Path) -> dict:
     """Parse $CODEX_HOME/auth.json. The access token is returned under a private

@@ -132,6 +132,8 @@ def table(snap: dict) -> str:
         label = VERDICT_LABELS.get(e["verdict"], e["verdict"])
         if has_applicable_reset_credit(e):
             label += " · reset available"
+        if e.get("window_unstarted"):
+            label += " · clock not started (touch)"
         if lane_expiry.get("expiring_unused"):
             unused = lane_expiry.get("projected_unused_percent")
             if isinstance(unused, (int, float)):
@@ -181,6 +183,8 @@ def table(snap: dict) -> str:
     reset_holders = limited_reset_credit_homes(snap["codex"]["homes"])
     if reset_holders:
         fleet_line += f" · resets available: {len(reset_holders)}"
+    if fleet.get("unstarted"):
+        fleet_line += f" · clocks not started: {len(fleet['unstarted'])}"
     windows_left = expiry.get("windows_left")
     projected_unused = expiry.get("projected_unused_windows")
     if expiry.get("complete") and isinstance(windows_left, (int, float)) \

@@ -191,6 +191,91 @@ def heal_expired_codex_homes(snap: dict, dry_run: bool = False,
     return events
 
 
+WINDOW_TOUCH_SPACING_MIN = 60
+
+
+def touch_unstarted_codex_windows(snap: dict, dry_run: bool = False,
+                                  touch_fn=None, reprobe_fn=None,
+                                  only: set[str] | None = None,
+                                  force: bool = False) -> list[dict]:
+    """Start the weekly clock on every lane whose window has not started.
+
+    A Codex weekly window starts on the first real request, so after a global
+    reset an idle lane's next reset slides a day for every idle day (Max
+    2026-09-14: touch it immediately). One tiny Luna turn per unstarted lane
+    (codex.touch_window), then a usage re-probe so the snapshot shows the
+    started clock. Attempts are spaced by WINDOW_TOUCH_SPACING_MIN per lane
+    (wham can lag a few minutes after the turn). `only` restricts the homes
+    considered; `force` touches them even when the window looks started and
+    ignores the spacing (the explicit `subfleet touch codex N` form).
+
+    Mutates snap entries and the fleet roll-up in place; returns
+    [{"home", "result": "touched"|"revoked"|"failed"|"dry-run", "detail",
+      "weekly_reset_at"}] for attempts made this cycle."""
+    now = now_local()
+    candidates = [
+        e for e in snap["codex"]["homes"]
+        if not e.get("duplicate_of")
+        and (only is None or e["home"] in only)
+        and (force or (e.get("verdict") == "ok"
+                       and codex.window_unstarted(e.get("probe") or {}, now)))
+    ]
+    if not candidates:
+        return []
+    touch_fn = touch_fn or codex.touch_window
+    reprobe_fn = reprobe_fn or _reprobe_home
+    state = load_json(paths.window_touch_path(), {}) or {}
+    events: list[dict] = []
+    state_changed = windows_changed = False
+    for e in candidates:
+        home = e["home"]
+        prev = state.get(home) or {}
+        last = parse_iso(prev.get("attempted_at"))
+        if not force and last and now - last < timedelta(minutes=WINDOW_TOUCH_SPACING_MIN):
+            continue
+        if dry_run:
+            print(f"[dry-run] would touch {_short(home)} (weekly clock not started)",
+                  file=sys.stderr)
+            events.append({"home": home, "result": "dry-run", "detail": "",
+                           "weekly_reset_at": None})
+            continue
+        attempt = touch_fn(home)
+        detail = (attempt.get("detail") or "").strip()
+        weekly_reset = None
+        if attempt.get("status") == "revoked":
+            result = "revoked"
+            e["verdict"] = "auth-revoked"
+        else:
+            result = "touched" if attempt.get("status") == "ok" else "failed"
+            fresh = reprobe_fn(home)
+            probe = fresh.get("probe") or {}
+            if probe.get("status") == "ok":
+                observed = fresh.get("observed")
+                e["probe"] = {k: v for k, v in probe.items() if not str(k).startswith("_")}
+                e["windows"] = snapshot.effective_windows(probe, observed)
+                e["reset_credits"] = codex.reset_credits_from_probe(probe)
+                e["window_unstarted"] = codex.window_unstarted(probe, now)
+                weekly = e["windows"].get("weekly") or e["windows"].get("secondary") or {}
+                weekly_reset = weekly.get("reset_at")
+                windows_changed = True
+        e["window_touch"] = {"attempted_at": iso(now), "result": result,
+                             "model": codex.TOUCH_MODEL, "rc": attempt.get("rc"),
+                             "detail": detail}
+        state[home] = {"attempted_at": iso(now), "result": result,
+                       "weekly_reset_at": weekly_reset, "detail": detail[:200]}
+        state_changed = True
+        events.append({"home": home, "result": result, "detail": detail,
+                       "weekly_reset_at": weekly_reset})
+        print(f"subfleet: window touch {_short(home)}: {result}"
+              + (f" ({detail})" if detail else ""), file=sys.stderr)
+    if state_changed:
+        atomic_write_json(paths.window_touch_path(), state)
+    if windows_changed or any(ev["result"] == "revoked" for ev in events):
+        fleet_now = parse_iso(snap.get("generated_at")) or now
+        snap["codex"]["fleet"] = snapshot.codex_fleet(snap["codex"]["homes"], fleet_now)
+    return events
+
+
 def _scoped_limit_conditions(snap: dict, now) -> list[dict]:
     """Critical model buckets from normalized account rows, with probe fallback."""
     claude_section = snap.get("claude") or {}
@@ -624,7 +709,27 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None,
     # Heal before persisting so the snapshot/brief/history and the conditions
     # below all see post-heal verdicts and fleet counts.
     heal_events = heal_expired_codex_homes(snap, dry_run=dry_run)
+    touch_events = touch_unstarted_codex_windows(snap, dry_run=dry_run)
     policy_now = parse_iso(snap.get("generated_at")) or now
+    touched = [ev for ev in touch_events if ev["result"] == "touched"]
+    touch_failed = [ev for ev in touch_events if ev["result"] in ("failed", "revoked")]
+    if touched or touch_failed:
+        lines = [
+            f"{_short(ev['home'])}: weekly reset now "
+            f"{fmt_clock(parse_iso(ev['weekly_reset_at']), policy_now) if ev.get('weekly_reset_at') else '?'}"
+            for ev in touched
+        ] + [
+            f"{_short(ev['home'])}: touch {ev['result']}"
+            + (f" ({ev['detail']})" if ev.get("detail") else "")
+            for ev in touch_failed
+        ]
+        _notify(
+            f"ℹ️ codex: weekly clock started on {len(touched)} lane(s)"
+            if touched else "⚠️ codex: weekly clock touch failed",
+            "Windows start on first use, so idle lanes were touched with one Luna turn each. "
+            + " · ".join(lines),
+            dry_run,
+        )
     policy_config = reset_policy.load_config()
     snap["codex"]["auto_reset"] = policy_config
     ranked = snapshot.rank_for_dispatch(snap["codex"]["homes"], now=policy_now)
@@ -748,6 +853,8 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None,
         "recovered": recovered,
         "refresh_probes": heal_events,
         "healed": [ev["home"] for ev in heal_events if ev["result"] == "healed"],
+        "window_touches": touch_events,
+        "touched": [ev["home"] for ev in touch_events if ev["result"] == "touched"],
         "reset_policy": policy_result,
         "reset_redemption": redemption,
     }

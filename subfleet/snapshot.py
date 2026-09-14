@@ -160,6 +160,9 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
                 "windows": eff,
                 "rollout_observed": observed,
                 "recent_errors": errors,
+                # Weekly clock not started (0%, reset_at sliding): the
+                # watchdog touches these — see codex.window_unstarted.
+                "window_unstarted": codex.window_unstarted(probe_result, now),
             }
         )
 
@@ -376,6 +379,11 @@ def codex_fleet(home_entries: list[dict], now) -> dict:
         "best_home": dispatchable[0]["home"] if dispatchable else None,
         "earliest_reset": iso(min(future_resets)) if future_resets else None,
         "resets_available": len(limited_reset_credit_homes(home_entries)),
+        "unstarted": [
+            e["home"] for e in home_entries
+            if e.get("window_unstarted") and e.get("verdict") == "ok"
+            and not e.get("duplicate_of")
+        ],
     }
 
 

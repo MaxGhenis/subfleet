@@ -146,6 +146,11 @@ def refresh_probes_path() -> Path:
     return state_dir() / "refresh-probes.json"
 
 
+def window_touch_path() -> Path:
+    """Watchdog weekly-clock touch ledger: per-home last attempt + result."""
+    return state_dir() / "window-touch.json"
+
+
 def lane_usage_path() -> Path:
     return state_dir() / "lane-usage.jsonl"
 
