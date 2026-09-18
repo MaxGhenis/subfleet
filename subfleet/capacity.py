@@ -177,10 +177,16 @@ def model_window_for(account: dict, model: str) -> dict | None:
     return window if isinstance(window, dict) else None
 
 
-def model_headroom_score(account: dict, model: str) -> float | None:
-    """Worst account-wide/model-specific headroom for one Claude model."""
+def model_headroom_score(account: dict, model: str, *,
+                         measured_only: bool = False) -> float | None:
+    """Worst headroom for ranking, or provider-measured headroom for gating.
+
+    Historical token ratios may rank lanes, but cannot establish exhaustion.
+    Rows without a separate measured field retain their existing semantics.
+    """
     values = []
-    base = _number(account.get("headroom_score"))
+    base = _number(account.get("measured_headroom_score", account.get("headroom_score"))
+                   if measured_only else account.get("headroom_score"))
     if base is not None:
         values.append(base)
     model_used = _number((model_window_for(account, model) or {}).get("used_percent"))
@@ -223,7 +229,7 @@ def account_cooldown_for(account: dict) -> str | None:
 
 def dispatchable_for(account: dict, model_family: str) -> bool:
     """Model-aware gate: account quota, persisted scope, then live model data."""
-    headroom = model_headroom_score(account, model_family)
+    headroom = model_headroom_score(account, model_family, measured_only=True)
     return (
         bool(account.get("dispatchable"))
         and account_cooldown_for(account) is None
@@ -241,6 +247,7 @@ def model_state_for(account: dict, model: str) -> dict:
     cooldown = model_cooldown_for(account, canonical)
     account_cooldown = account_cooldown_for(account)
     headroom = model_headroom_score(account, canonical)
+    measured_headroom = model_headroom_score(account, canonical, measured_only=True)
     known_used = [
         value for value in (
             _number((window or {}).get("used_percent")),
@@ -257,7 +264,7 @@ def model_state_for(account: dict, model: str) -> dict:
     elif not account.get("dispatchable"):
         state = str(account.get("status") or "unavailable")
         until = account.get("limited_until")
-    elif headroom is not None and headroom < DEFAULT_MIN_HEADROOM:
+    elif measured_headroom is not None and measured_headroom < DEFAULT_MIN_HEADROOM:
         state = "exhausted"
         resets = [
             value for value in (
@@ -274,6 +281,7 @@ def model_state_for(account: dict, model: str) -> dict:
         "until": until,
         "used_percent": max(known_used) if known_used else None,
         "headroom_score": headroom,
+        "measured_headroom_score": measured_headroom,
     }
 
 
@@ -465,7 +473,11 @@ def active_keepalive_window(email: str, *, now: datetime | None = None,
 
 def learned_capacities(email: str, *, records: Iterable[dict] | None = None,
                        path: Path | str | None = None) -> dict[str, int | None]:
-    """Largest independently observed hard-limit sum for each window."""
+    """Historical token denominators for ranking, not provider quota limits.
+
+    Legacy unscoped events do not identify which window or model was binding.
+    Their cumulative token sums cannot establish current account exhaustion.
+    """
     records = read_ledger(path) if records is None else records
     five_hour: int | None = None
     weekly: int | None = None
@@ -1123,6 +1135,14 @@ def _claude_rows(live_rows: list[dict], now: datetime, records: list[dict],
                 base["model_windows"] = {}
         five_hour = base["five_hour"]
         weekly = base["weekly"]
+        # Preserve the actual provider readings before filling missing windows
+        # with historical ratios. Keepalive reset observations do not measure
+        # utilization, and a legacy hard-limit denominator is not a quota.
+        measured_windows = (
+            (dict(five_hour), dict(weekly))
+            if base.get("probe_status") == "ok" else ({}, {})
+        )
+        measured_score = _score(*measured_windows)
         # An active account without a lane token is represented solely by its
         # desktop live probe. Historical lane-ledger estimates must not hide a
         # live 401/403/429 or masquerade as desktop usage.
@@ -1143,13 +1163,14 @@ def _claude_rows(live_rows: list[dict], now: datetime, records: list[dict],
                     window["confidence"] = "live"
                 else:
                     window["used_percent"] = _ratio(tokens, learned_capacity)
-                    window["confidence"] = "observed" if learned_capacity else "estimated"
+                    window["confidence"] = "estimated"
             keepalive_window = active_keepalive_window(
                 email, now=now, records=records
             )
-            if keepalive_window:
+            if keepalive_window and five_hour.get("confidence") != "live":
                 five_hour["reset_at"] = keepalive_window["reset_at"]
-                five_hour["confidence"] = "observed"
+                if five_hour.get("used_percent") is None:
+                    five_hour["confidence"] = "observed"
 
         cooldown_scopes = dict(cooldowns.get(email, {}))
         ledger_model_scopes = {
@@ -1184,7 +1205,7 @@ def _claude_rows(live_rows: list[dict], now: datetime, records: list[dict],
             status = "secret-missing"
         elif limited_until or live_hard_limit:
             status = "limited"
-        elif score is not None and score < DEFAULT_MIN_HEADROOM:
+        elif measured_score is not None and measured_score < DEFAULT_MIN_HEADROOM:
             status = "exhausted"
         else:
             # A failed desktop app-token probe does not make its separately
@@ -1193,11 +1214,8 @@ def _claude_rows(live_rows: list[dict], now: datetime, records: list[dict],
         if status in {"limited", "exhausted", "rate-limited"}:
             score = 0.0
         if status == "exhausted" and limited_until is None:
-            limited_until = _parse_time(_window_limit(five_hour, weekly, now))
-        dispatchable = (
-            enrolled_lane and status == "ok"
-            and (score is None or score >= DEFAULT_MIN_HEADROOM)
-        )
+            limited_until = _parse_time(_window_limit(*measured_windows, now))
+        dispatchable = enrolled_lane and status == "ok"
         dispatch_score = (
             round(score - (INTERACTIVE_HANDICAP if base.get("active") else 0.0), 2)
             if score is not None else None
@@ -1229,6 +1247,7 @@ def _claude_rows(live_rows: list[dict], now: datetime, records: list[dict],
                 "status": status,
                 "dispatchable": dispatchable,
                 "headroom_score": score,
+                "measured_headroom_score": measured_score,
                 "dispatch_score": dispatch_score,
                 "enrolled": enrolled_lane,
                 "secret_available": secret_availability.get(email) if enrolled_lane else None,

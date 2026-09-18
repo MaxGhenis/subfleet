@@ -67,6 +67,45 @@ class TestRouting:
             "command": "pr", "target": "42", "peer": "fable", "action": "merge"
         }
 
+    @pytest.mark.parametrize("kind,target", [("plan", "plan.md"), ("pr", "42")])
+    @pytest.mark.parametrize("limit_args,expected", [([], 0), (["--max-rounds", "3"], 3)])
+    def test_new_gate_defaults_to_unlimited_but_keeps_explicit_caps(
+        self, monkeypatch, kind, target, limit_args, expected,
+    ):
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_gate", lambda args: seen.update(max_rounds=args.max_rounds) or 0)
+        assert cli.main(["gate", kind, target, "--peer", "sol", *limit_args]) == 0
+        assert seen["max_rounds"] == expected
+
+    @pytest.mark.parametrize("limit_args,expected", [([], None), (["--max-rounds", "0"], 0), (["--max-rounds", "8"], 8)])
+    def test_gate_continue_distinguishes_preserved_and_replaced_limits(
+        self, monkeypatch, limit_args, expected,
+    ):
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_gate", lambda args: seen.update(max_rounds=args.max_rounds) or 0)
+        assert cli.main(["gate", "continue", "gate-1", *limit_args]) == 0
+        assert seen["max_rounds"] == expected
+
+    @pytest.mark.parametrize("gate_args", [
+        ["plan", "plan.md", "--peer", "fable"],
+        ["pr", "42", "--peer", "fable"],
+        ["continue", "gate-1"],
+    ])
+    def test_gate_account_routing_arguments(self, monkeypatch, gate_args):
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_gate", lambda args: seen.update(
+            account=args.peer_account, excluded=args.exclude_account,
+        ) or 0)
+        assert cli.main([
+            "gate", *gate_args, "--peer-account", "review@example.org",
+            "--exclude-account", "interactive@example.org",
+            "--exclude-account", "busy@example.org",
+        ]) == 0
+        assert seen == {
+            "account": "review@example.org",
+            "excluded": ["interactive@example.org", "busy@example.org"],
+        }
+
     def test_tool_passthrough_execs_sibling_script(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(cli, "_exec_tool", lambda name, rest: seen.update(name=name, rest=rest) or 0)

@@ -28,7 +28,7 @@ from .util import atomic_write_json, load_json, now_local
 
 
 SCHEMA_VERSION = 1
-DEFAULT_MAX_ROUNDS = 4
+DEFAULT_MAX_ROUNDS = 0
 MAX_CONTEXT_BYTES = 64 * 1024
 VERDICT_BEGIN = "---SUBFLEET-VERDICT-BEGIN---"
 VERDICT_END = "---SUBFLEET-VERDICT-END---"
@@ -993,6 +993,9 @@ def _review_round(
     delegate_main: DelegateMain,
     runner: RunCommand,
     as_json: bool,
+    max_rounds_override: int | None = None,
+    peer_account: str | None = None,
+    exclude_accounts: tuple[str, ...] = (),
 ) -> int:
     subject, snapshot = _capture_subject(state, runner=runner)
     if state["kind"] == "pr":
@@ -1020,8 +1023,16 @@ def _review_round(
                 "artifact is unchanged after changes were requested; change it or pass --response FILE",
                 3,
             )
+        if max_rounds_override is not None and max_rounds_override != state["max_rounds"]:
+            state.setdefault("round_limit_changes", []).append({
+                "previous_max_rounds": state["max_rounds"],
+                "max_rounds": max_rounds_override,
+                "at": _now_iso(),
+                "expected_revision": expected_revision,
+            })
+            state["max_rounds"] = max_rounds_override
         round_number = len(state.get("rounds") or []) + 1
-        if round_number > int(state["max_rounds"]):
+        if state["max_rounds"] and round_number > int(state["max_rounds"]):
             state["status"] = "blocked"
             state["blocker"] = f"maximum of {state['max_rounds']} peer rounds reached"
             _save_state(gate_dir, state)
@@ -1119,6 +1130,10 @@ def _review_round(
         "-o",
         str(output_path),
     ]
+    if peer_account is not None:
+        peer_argv += ["-a", peer_account]
+    for account in exclude_accounts:
+        peer_argv += ["-x", account]
     if preparation_error:
         peer_rc = 1
     else:
@@ -1199,7 +1214,7 @@ def _review_round(
             state["status"] = "agreed"
             state.pop("blocker", None)
         elif verdict["verdict"] == "changes_requested":
-            if round_number >= int(state["max_rounds"]):
+            if state["max_rounds"] and round_number >= int(state["max_rounds"]):
                 state["status"] = "blocked"
                 state["blocker"] = f"maximum of {state['max_rounds']} peer rounds reached"
             else:
@@ -1236,6 +1251,20 @@ def _review_round(
     )
 
 
+def _peer_routing(args: Any, peer: str) -> tuple[str | None, tuple[str, ...]]:
+    """Validate account routing for this dispatch without persisting defaults."""
+    account = getattr(args, "peer_account", None)
+    exclusions = tuple(dict.fromkeys(getattr(args, "exclude_account", None) or []))
+    if (account is not None or exclusions) and peer != "fable":
+        raise GateError("--peer-account and --exclude-account require a Claude peer (fable)")
+    account_names = (*exclusions, account) if account is not None else exclusions
+    if any(not value.strip() for value in account_names):
+        raise GateError("peer account routing requires nonempty account names")
+    if account is not None and account.casefold() in {value.casefold() for value in exclusions}:
+        raise GateError("--peer-account cannot also appear in --exclude-account")
+    return account, exclusions
+
+
 def _new_gate(
     args: Any,
     *,
@@ -1253,8 +1282,9 @@ def _new_gate(
             file=sys.stderr,
         )
         args.peer = replacement
-    if args.max_rounds < 1:
-        raise GateError("--max-rounds must be at least 1")
+    peer_account, exclude_accounts = _peer_routing(args, args.peer)
+    if args.max_rounds < 0:
+        raise GateError("--max-rounds must be 0 (unlimited) or a positive integer")
     cwd = Path(args.workdir or os.getcwd()).expanduser().resolve()
     if not cwd.is_dir():
         raise GateError(f"workdir is not a directory: {cwd}")
@@ -1278,7 +1308,10 @@ def _new_gate(
     if args.dry_run:
         preview = {
             "kind": kind,
+            "max_rounds": args.max_rounds,
             "peer": args.peer,
+            "peer_account": peer_account,
+            "exclude_accounts": list(exclude_accounts),
             "revision": _revision(subject),
             "on_agreement": args.on_agreement,
             "workdir": str(cwd),
@@ -1321,6 +1354,8 @@ def _new_gate(
         delegate_main=delegate_main,
         runner=runner,
         as_json=args.json,
+        peer_account=peer_account,
+        exclude_accounts=exclude_accounts,
     )
 
 
@@ -1330,10 +1365,14 @@ def _continue_gate(
     delegate_main: DelegateMain,
     runner: RunCommand,
 ) -> int:
+    max_rounds_override = getattr(args, "max_rounds", None)
+    if max_rounds_override is not None and max_rounds_override < 0:
+        raise GateError("--max-rounds must be 0 (unlimited) or a positive integer")
     gate_dir = _gate_dir(args.gate_id)
     if not gate_dir.is_dir():
         raise GateError(f"unknown gate: {args.gate_id}")
     state = _load_state(gate_dir)
+    peer_account, exclude_accounts = _peer_routing(args, state["peer"])
     if args.dry_run:
         current, _ = _capture_subject(state, runner=runner)
         preview = {
@@ -1341,8 +1380,12 @@ def _continue_gate(
             "next_round": len(state.get("rounds") or []) + 1,
             "status": state["status"],
             "peer": state["peer"],
+            "peer_account": peer_account,
+            "exclude_accounts": list(exclude_accounts),
             "revision": _revision(current),
             "on_agreement": state["on_agreement"],
+            "max_rounds": state["max_rounds"] if max_rounds_override is None else max_rounds_override,
+            "current_max_rounds": state["max_rounds"],
         }
         print(json.dumps(preview, sort_keys=True) if args.json else json.dumps(preview, indent=2))
         return 0
@@ -1506,6 +1549,9 @@ def _continue_gate(
         delegate_main=delegate_main,
         runner=runner,
         as_json=args.json,
+        max_rounds_override=max_rounds_override,
+        peer_account=peer_account,
+        exclude_accounts=exclude_accounts,
     )
 
 

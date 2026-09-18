@@ -229,6 +229,48 @@ class TestClaudePickCli:
             lambda *args, **kwargs: pytest.fail("setup-token usage probe must not run"),
         )
 
+    @pytest.mark.parametrize("model_args", [[], ["--model", "fable"], ["--model", "opus"]])
+    def test_pick_accepts_historical_ratio_above_quota_without_live_limit(
+            self, env_paths, monkeypatch, capsys, model_args):
+        now = now_local()
+        row = capacity._claude_rows(
+            [], now, [
+                {"email": "estimated@x.com", "event": "hard_limit",
+                 "ts": iso(now - timedelta(days=8)), "window_tokens_5h": 100,
+                 "window_tokens_7d": 100},
+                {"email": "estimated@x.com", "ts": iso(now - timedelta(hours=6)),
+                 "total_tokens": 5000},
+            ], accounts_file="unused-roster.json",
+            config={"accounts": ["estimated@x.com"],
+                    "enrolled": {"estimated@x.com": "fixture-secret"}},
+            secret_availability={"estimated@x.com": True},
+        )[0]
+        self._patch_rows(monkeypatch, [row])
+        assert cli.main(["pick", "claude", *model_args]) == 0
+        assert capsys.readouterr().out.strip() == "estimated@x.com"
+        ranked, excluded = cli._capacity_lane_ranking(
+            {"accounts": [row]}, handicap=0, min_headroom=95,
+            model="fable" if model_args else None,
+        )
+        assert not excluded and ranked[0]["weekly_used_percent"] == 5000
+        assert ranked[0]["measured_headroom_score"] is None
+
+    @pytest.mark.parametrize("model", [None, "fable"])
+    @pytest.mark.parametrize("separate_measurement", [False, True])
+    def test_custom_floor_uses_measured_headroom_with_legacy_compatibility(
+            self, env_paths, monkeypatch, capsys, model, separate_measurement):
+        row = capacity_lane("measured@x.com", fh=90, wk=20, confidence="live")
+        if separate_measurement:
+            row["measured_headroom_score"] = 10
+            row["weekly"].update(used_percent=5000, confidence="estimated")
+            row["headroom_score"] = 0
+        self._patch_rows(monkeypatch, [row])
+        args = ["pick", "claude"] + (["--model", model] if model else [])
+        assert cli.main([*args, "--min-headroom", "15"]) == 1
+        capsys.readouterr()
+        assert cli.main([*args, "--min-headroom", "5"]) == 0
+        assert capsys.readouterr().out.strip() == "measured@x.com"
+
     def test_best_email_on_stdout(self, env_paths, monkeypatch, capsys):
         self._patch_rows(monkeypatch, [
             capacity_lane("a@x.com", fh=40, wk=30),

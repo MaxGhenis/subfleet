@@ -51,6 +51,12 @@
 #   -D  explicit source tree the isolated peer may read from its neutral cwd.
 #   -b main|master is refused (exit 2, before anything runs): the salvage push
 #   would force-push WIP onto that branch. Use e.g. -b codex-salvage/<lane>.
+#   Quota outcomes: 4 = recognized usage limit with no alternate in the
+#   allowed scope (a pinned home or the picker's current candidates);
+#   8 = recognized usage limit at the retry budget, without probing whether
+#   another home is available. Neither alone proves fleet-wide exhaustion.
+#   Other provider errors retain their status except 4/8, reserved here and
+#   normalized to 1. A cooldown/picker/guard failure is not quota exhaustion.
 #   env: SUBFLEET_RUN_ID   ledger entry pre-created by `subfleet run` — adopted
 #        (lane/pid/paths filled in) instead of starting a second record.
 #        SUBFLEET_RUN_RESUMED_FROM  source ledger run id for resume provenance.
@@ -570,12 +576,29 @@ while :; do
   fi
   if grep -qiE "hit your usage limit|usage limit reached" "$ERR_FILE"; then
     OLD_HOME=$CODEX_HOME_ARG
-    "$SUBFLEET" _record-codex-cooldown --home "$OLD_HOME" --minutes 15 >/dev/null 2>&1 || true
-    if [ "$AUTO_LANE" = 1 ] && [ $attempt -le $MAX_RETRIES ]; then
-      NEW_HOME=$($CODEX_PICK_BIN) || NEW_HOME=""
-      if [ -n "$NEW_HOME" ] && [ "$NEW_HOME" != "$OLD_HOME" ]; then
+    if ! "$SUBFLEET" _record-codex-cooldown --home "$OLD_HOME" --minutes 15 >/dev/null 2>&1; then
+      echo "subfleet codex: could not record usage-limit cooldown; stopping" >&2
+      exit 1
+    fi
+    if [ "$AUTO_LANE" = 1 ]; then
+      if [ $attempt -gt $MAX_RETRIES ]; then
+        echo "subfleet codex: quota retry budget exhausted (attempt=$attempt); remaining home capacity untested" >&2
+        exit 8
+      fi
+      NEW_HOME=$($CODEX_PICK_BIN)
+      PICK_RC=$?
+      if [ "$PICK_RC" -ne 0 ] && [ "$PICK_RC" -ne 1 ]; then
+        echo "subfleet codex: lane picker failed (rc=$PICK_RC); stopping" >&2
+        exit 1
+      fi
+      if [ "$PICK_RC" -eq 0 ]; then
+        if [ -z "$NEW_HOME" ] || [ "$NEW_HOME" = "$OLD_HOME" ]; then
+          echo "subfleet codex: lane picker returned an empty or just-cooled home; stopping" >&2
+          exit 1
+        fi
         if [ "$GUARD_ON" = 1 ] && ! "$HERE/subfleet-guard" preflight -H "$NEW_HOME" -C "$WORKDIR" >&2; then
           echo "subfleet codex: guard preflight refused re-picked lane ${NEW_HOME/#$HOME/~}; stopping" >&2
+          exit 2
         else
           CODEX_HOME_ARG=$NEW_HOME
           record_run_lane
@@ -586,6 +609,7 @@ while :; do
         echo "subfleet codex: usage limit on ${OLD_HOME/#$HOME/~} and no alternate lane available" >&2
       fi
     fi
+    exit 4
   fi
   if [ $attempt -le $MAX_RETRIES ] && grep -qiE "capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out|temporarily" "$ERR_FILE"; then
     wait_s=$((60 * attempt))
@@ -595,6 +619,7 @@ while :; do
   fi
   echo "subfleet codex: FAILED rc=$rc attempt=$attempt (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
   tail -3 "$ERR_FILE" >&2
-  [ "$rc" -eq 0 ] && rc=1  # rc=0 with an empty out file is still a failure — don't report success
+  # Empty successful output is failure; quota statuses are runner-owned.
+  case "$rc" in 0|4|8) rc=1 ;; esac
   exit "$rc"
 done

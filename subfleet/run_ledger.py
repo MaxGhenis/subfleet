@@ -680,7 +680,10 @@ def output_collisions(out_path: str | Path | None, *,
 
 
 def _notify_state(meta: dict[str, Any]) -> str | None:
-    """One word for the table: pushed / parked / none / - (not applicable)."""
+    """One word for the table: pending / none / landed (pushed and seen in the
+    transcript) / surfaced (rendered by a hook or reported inline) / revived
+    (a one-shot host carried it) / lost (pushes left no trace; the hooks
+    render it) / pushed (accepted, not yet confirmed) / parked."""
     if not isinstance(meta.get("caller"), dict):
         return None
     info = meta.get("notify")
@@ -688,10 +691,15 @@ def _notify_state(meta: dict[str, Any]) -> str | None:
         return "pending"
     if not isinstance(info, dict):
         return "none"
+    followup = info.get("followup") if isinstance(info.get("followup"), dict) else {}
+    if info.get("surfaced"):
+        return "landed" if info.get("pushed") and info.get("surfaced_by") == "transcript" else "surfaced"
+    if followup.get("revive"):
+        return "revived"
+    if followup.get("lost"):
+        return "lost"
     if info.get("pushed"):
         return "pushed"
-    if info.get("surfaced"):
-        return "surfaced"
     return "parked"
 
 

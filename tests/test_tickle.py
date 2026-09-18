@@ -227,7 +227,8 @@ def test_restart_stub_and_limit_banner_are_seen_through(tmp_path, kind):
     assert "hit a usage limit" in state["detail"] and "resume stub" in state["detail"]
     assert tickle.dedupe_key(state) == "stub-a1"
     text = tickle.message(state)
-    assert "hit its usage limit mid-task" in text and "fresh one now" in text
+    assert "usage-limit banner" in text and "Detected in the transcript" in text
+    assert "fresh" not in text and "account switch" not in text
     # trailing assistant text under a limit banner: the session was still
     # making requests when the limit hit — resume it (hedged in the message)
     done = [_entry("assistant", [{"type": "text", "text": "Now let me run the tests."}], uuid="a9"),
@@ -403,7 +404,7 @@ def test_cold_sessions_and_auto_revive_skip_headless_lane_runs(registry, tmp_pat
     monkeypatch.setattr(tickle, "live_revive_sessions", lambda: {})
     monkeypatch.setattr(tickle, "probe_lane", lambda **kw: ("lane@example.com", "tok"))
     monkeypatch.setattr(tickle, "revive_session",
-                        lambda cli, cwd, token, *, bypass, model=None, popen=None:
+                        lambda cli, cwd, token, *, bypass, model=None, popen=None, **kw:
                         spawned.append(cli) or 4242)
     results = {r.get("session_id"): r for r in tickle.auto_revive()}
     assert spawned == [typed]
@@ -480,7 +481,7 @@ def test_auto_revive_guards_and_launch(registry, tmp_path, monkeypatch):
     monkeypatch.setattr(tickle, "live_revive_sessions", lambda: {})
     monkeypatch.setattr(tickle, "probe_lane", lambda **kw: ("lane@example.com", "tok"))
     monkeypatch.setattr(tickle, "revive_session",
-                        lambda cli, cwd, token, *, bypass, model=None, popen=None:
+                        lambda cli, cwd, token, *, bypass, model=None, popen=None, **kw:
                         spawned.append((cli, cwd, bypass, model)) or 4242)
     results = {r.get("session_id"): r for r in tickle.auto_revive()}
     assert results[work].get("revived") is True and results[work]["lane"] == "lane@example.com"
@@ -557,7 +558,9 @@ def test_revive_session_model_flag_is_opt_in(tmp_path, monkeypatch, model):
     assert pid == 4242
     assert len(calls) == 1
     cmd, kwargs = calls[0]
-    expected = ["claude", "-p", "--resume", SESSION, tickle.REVIVE_MESSAGE]
+    prompt = tickle.message({}, revive={"host": tickle.REVIVE_HOST_PRINT, "lane": None,
+                                        "model": model, "detail": None})
+    expected = ["claude", "-p", "--resume", SESSION, prompt]
     if model is not None:
         expected += ["--model", model]
     expected.append("--dangerously-skip-permissions")
@@ -785,7 +788,7 @@ def test_auto_revive_preserves_min_age_probe_cwd_and_batch_guards(
     launched = []
     monkeypatch.setattr(
         tickle, "revive_session",
-        lambda cli, cwd, token, *, bypass, model=None:
+        lambda cli, cwd, token, *, bypass, model=None, **kw:
         launched.append((cli, model)) or 4242,
     )
 
@@ -848,7 +851,7 @@ def test_auto_revive_never_crosses_tiers_without_an_explicit_model(tmp_path, mon
     monkeypatch.setattr(tickle, "probe_lane", fake_probe)
     monkeypatch.setattr(
         tickle, "revive_session",
-        lambda cli, cwd, token, *, bypass, model=None:
+        lambda cli, cwd, token, *, bypass, model=None, **kw:
         launched.append((cli, cwd, token, bypass, model)) or 4242,
     )
     # automatic: no recorded model -> default tier only; opus lane must not be used
@@ -889,7 +892,7 @@ def test_auto_revive_targets_each_sessions_own_recorded_model(tmp_path, monkeypa
     monkeypatch.setattr(tickle, "probe_lane", fake_probe)
     monkeypatch.setattr(
         tickle, "revive_session",
-        lambda cli, cwd, token, *, bypass, model=None:
+        lambda cli, cwd, token, *, bypass, model=None, **kw:
         launched.append((cli, model)) or 4242,
     )
     results = {r["session_id"]: r for r in tickle.auto_revive()}
@@ -925,7 +928,7 @@ def test_auto_revive_reads_the_serving_model_from_the_transcript(tmp_path, monke
     launched = []
     monkeypatch.setattr(
         tickle, "revive_session",
-        lambda cli, cwd, token, *, bypass, model=None:
+        lambda cli, cwd, token, *, bypass, model=None, **kw:
         launched.append((cli, model)) or 4242,
     )
     results = {r["session_id"]: r for r in tickle.auto_revive()}
@@ -1050,7 +1053,7 @@ def test_auto_revive_resumes_a_retired_fable_session_on_the_current_pin(registry
     monkeypatch.setattr(tickle, "probe_lane_any",
                         lambda models, **kw: probed.append(list(models)) or ("lane@example.com", "tok", models[0]))
     monkeypatch.setattr(tickle, "revive_session",
-                        lambda cli, cwd, token, *, bypass, model=None, popen=None:
+                        lambda cli, cwd, token, *, bypass, model=None, popen=None, **kw:
                         spawned.append((cli, cwd, bypass, model)) or 4242)
     results = {r.get("session_id"): r for r in tickle.auto_revive()}
     assert results[work].get("revived") is True

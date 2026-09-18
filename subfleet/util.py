@@ -92,6 +92,34 @@ def parse_reset_clock(text: str, event_time: datetime) -> datetime | None:
     return reset
 
 
+def reversed_lines(path: Path, *, chunk: int = 512 * 1024, max_bytes: int = 64 * 1024 * 1024):
+    """Yield a file's non-empty lines from the end backwards, reading in
+    chunks, so a long run of late entries cannot hide what came before them.
+    Stops (silently) at ``max_bytes`` scanned or on any OSError."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            end = size
+            carry = b""
+            scanned = 0
+            while end > 0 and scanned < max_bytes:
+                start = max(0, end - chunk)
+                stream.seek(start)
+                block = stream.read(end - start) + carry
+                scanned += end - start
+                parts = block.split(b"\n")
+                carry = parts[0] if start > 0 else b""
+                lines = parts[1:] if start > 0 else parts
+                for raw in reversed(lines):
+                    if raw.strip():
+                        yield raw.decode("utf-8", "replace")
+                end = start
+            if carry.strip() and scanned < max_bytes:
+                yield carry.decode("utf-8", "replace")
+    except OSError:
+        return
+
+
 def atomic_write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")

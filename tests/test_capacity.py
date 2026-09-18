@@ -75,6 +75,99 @@ def patch_lane_roster(monkeypatch, *emails):
     )
 
 
+def historical_ratio_row(*, live=None, usage_time=NOW, secret=True, enrolled=True,
+                         extra_records=()):
+    """A misleading legacy denominator, with no current provider limit."""
+    records = [
+        {"ts": (NOW - timedelta(days=8)).isoformat(), "email": "lane@x.com",
+         "event": "hard_limit", "window_tokens_5h": 100,
+         "window_tokens_7d": 100, "reset": None},
+        usage_record(usage_time, total=5000),
+        *extra_records,
+    ]
+    return capacity._claude_rows(
+        [live] if live is not None else [], NOW, records,
+        accounts_file="unused-roster.json",
+        config={"accounts": ["lane@x.com"],
+                "enrolled": {"lane@x.com": "fixture-secret"} if enrolled else {}},
+        secret_availability={"lane@x.com": secret},
+    )[0]
+
+
+@pytest.mark.parametrize("usage_time", [NOW, NOW - timedelta(hours=6)])
+def test_historical_ratios_rank_but_never_exhaust_a_lane(usage_time):
+    row = historical_ratio_row(usage_time=usage_time)
+    assert row["weekly"]["used_percent"] == 5000
+    assert row["five_hour"]["used_percent"] == (5000 if usage_time == NOW else 0)
+    assert row["headroom_score"] == 0  # Retained ranking estimate.
+    assert row["measured_headroom_score"] is None
+    assert row["confidence"] == "estimated"
+    assert row["status"] == "ok" and row["dispatchable"]
+    assert row["limited_until"] is None and not row["cooldowns"]
+    assert capacity.family_summaries([row], now=NOW)["claude"]["available"]
+    for model in capacity.CLAUDE_MODEL_FAMILIES:
+        assert capacity.dispatchable_for(row, model)
+        state = capacity.model_state_for(row, model)
+        assert state["state"] == "ok" and state["until"] is None
+
+
+def test_live_healthy_window_is_not_overruled_by_missing_weekly_estimate():
+    live = live_claude_row(five=20)
+    live["weekly"] = capacity._window()
+    row = historical_ratio_row(live=live)
+    assert row["weekly"]["used_percent"] == 5000
+    assert row["headroom_score"] == 0
+    assert row["measured_headroom_score"] == 80
+    assert row["dispatchable"] and capacity.dispatchable_for(row, "fable")
+
+
+@pytest.mark.parametrize("window_name", ["five_hour", "weekly"])
+def test_real_provider_headroom_still_blocks_with_historical_estimates(window_name):
+    live = live_claude_row()
+    reset = (NOW + timedelta(hours=2)).isoformat()
+    live[window_name].update(used_percent=98, reset_at=reset)
+    row = historical_ratio_row(live=live, extra_records=[
+        {"email": "lane@x.com", "kind": "keepalive", "ts": NOW.isoformat()},
+    ])
+    assert row[window_name]["confidence"] == "live"
+    assert row["measured_headroom_score"] == 2
+    assert row["status"] == "exhausted" and not row["dispatchable"]
+    assert row["limited_until"] == reset
+    assert not capacity.dispatchable_for(row, "fable")
+
+
+def test_live_model_bucket_still_blocks_only_that_model():
+    live = live_claude_row()
+    live["weekly"] = capacity._window()
+    live["model_windows"] = {"fable": capacity._window(used_percent=98, confidence="live")}
+    row = historical_ratio_row(live=live)
+    assert row["dispatchable"]
+    assert not capacity.dispatchable_for(row, "fable")
+    assert capacity.model_state_for(row, "fable")["state"] == "exhausted"
+    assert capacity.dispatchable_for(row, "opus")
+
+
+@pytest.mark.parametrize("scope", ["*", "claude-fable-5-1"])
+def test_active_cooldowns_survive_advisory_estimates(monkeypatch, scope):
+    reset = NOW + timedelta(hours=2)
+    monkeypatch.setattr(capacity, "_cooldowns", lambda now: {"lane@x.com": {scope: reset}})
+    row = historical_ratio_row()
+    assert not capacity.dispatchable_for(row, "fable")
+    assert capacity.model_state_for(row, "fable")["state"] == "cooled"
+    assert capacity.dispatchable_for(row, "opus") is (scope != "*")
+
+
+@pytest.mark.parametrize("guard", ["secret-missing", "not-enrolled", "hard-limit"])
+def test_estimate_change_does_not_bypass_lane_guards(guard):
+    extra = [{"ts": NOW.isoformat(), "email": "lane@x.com", "event": "hard_limit"}]
+    row = historical_ratio_row(
+        secret=guard != "secret-missing", enrolled=guard != "not-enrolled",
+        extra_records=extra if guard == "hard-limit" else (),
+    )
+    assert row["status"] == ("limited" if guard == "hard-limit" else guard)
+    assert not row["dispatchable"] and not capacity.dispatchable_for(row, "fable")
+
+
 class TestTranscriptLedger:
     def test_last_message_occurrence_wins(self, tmp_path):
         transcript = tmp_path / "session.jsonl"
@@ -627,7 +720,8 @@ class TestFamilyScoring:
         assert row["five_hour"]["used_percent"] == 60
         assert row["weekly"]["used_percent"] == 80
         assert row["headroom_score"] == 20
-        assert row["confidence"] == "observed"
+        assert row["confidence"] == "estimated"
+        assert row["measured_headroom_score"] is None
         assert row["learned_capacity"] == {"five_hour": 100, "weekly": 100}
         assert data["families"]["claude"]["headroom_score"] == 20
 

@@ -45,11 +45,13 @@
 # Usage:
 #   subfleet claude -a <email> | -A  -C <workdir> -p <prompt_file> -o <out_file> \
 #               [-m <model>] [-s workspace-write|read-only] [-b <salvage_branch>] \
-#               [-R <salvage_remote>] [-r <max_retries>] [-I -D <review_root>] [-d]
+#               [-R <salvage_remote>] [-r <max_retries>] [-x <email>] [-I -D <review_root>] [-d]
 #
 #   -a  account email (token read from keychain item claude-quota-<email>)
 #   -A  auto-pick from subfleet capacity; re-picks if the lane hits a limit.
 #       With -a as well: start on that lane, re-pick on a hard limit.
+#   -x  exclude an account from every attempt, including rotations; repeatable.
+#       Cannot name the same account as -a.
 #   -m  model (default claude-fable-5-1)
 #   -s  workspace-write (default): --dangerously-skip-permissions;
 #       read-only: explicit plan mode with Read, Glob, Grep, WebSearch, and
@@ -103,10 +105,17 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)
 ORIG_ARGS=("$@")
 EMAIL="" AUTO=0 MODEL="claude-fable-5-1" WORKDIR="" PROMPT_FILE="" OUT_FILE="" REVIEW_ROOT=""
 SANDBOX="workspace-write" SALVAGE_BRANCH="" SALVAGE_REMOTE="origin" MAX_RETRIES=2 DETACH=0 ISOLATED=0
-while getopts "a:Am:C:p:o:s:b:R:r:ID:d" opt; do
+EXCLUDED_LANES=()
+EXCLUDED_COUNT=0
+while getopts "a:Ax:m:C:p:o:s:b:R:r:ID:d" opt; do
   case "$opt" in
     a) EMAIL=$OPTARG ;;
     A) AUTO=1 ;;
+    x)
+      [ -n "$OPTARG" ] || { echo "subfleet claude: -x requires a nonempty email" >&2; exit 2; }
+      EXCLUDED_LANES[$EXCLUDED_COUNT]=$OPTARG
+      EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
+      ;;
     m) MODEL=$OPTARG ;;
     C) WORKDIR=$OPTARG ;;
     p) PROMPT_FILE=$OPTARG ;;
@@ -122,6 +131,16 @@ while getopts "a:Am:C:p:o:s:b:R:r:ID:d" opt; do
   esac
 done
 [ -n "$EMAIL" ] || [ "$AUTO" = 1 ] || { echo "subfleet claude: need -a <email> or -A" >&2; exit 2; }
+# Reject a contradictory pin before token access or a detached child starts.
+if [ -n "$EMAIL" ] && [ "$EXCLUDED_COUNT" -gt 0 ]; then
+  for excluded in "${EXCLUDED_LANES[@]}"; do
+    if [ "$EMAIL" = "$excluded" ]; then
+      echo "subfleet claude: pinned account $EMAIL is excluded by -x" >&2
+      exit 2
+    fi
+  done
+  unset excluded
+fi
 [ -n "$WORKDIR" ] || { echo "subfleet claude: missing -C <workdir>" >&2; exit 2; }
 [ -n "$PROMPT_FILE" ] || { echo "subfleet claude: missing -p <prompt_file>" >&2; exit 2; }
 [ -n "$OUT_FILE" ] || { echo "subfleet claude: missing -o <out_file>" >&2; exit 2; }
@@ -177,8 +196,6 @@ CLAUDE_PICK=${CLAUDE_LANE_PICK:-}
 BACKOFF_BASE=${CLAUDE_LANE_BACKOFF:-60}
 MODEL_CHECK_RETRIES=${CLAUDE_LANE_MODEL_CHECK_RETRIES:-4}
 MODEL_CHECK_BACKOFF=${CLAUDE_LANE_MODEL_CHECK_BACKOFF:-1}
-EXCLUDED_LANES=()
-EXCLUDED_COUNT=0
 RUN_ID=""
 SID=""
 # Aliases (fable/opus/…) and retired pins resolve to the canonical full id
@@ -297,7 +314,8 @@ if [ "$DETACH" = 1 ] && [ "$DETACHED_CHILD" = 0 ]; then
   export CLAUDE_LANE_DETACHED=1
   export CLAUDE_LANE_OWNED_PROMPT="$DETACHED_PROMPT"
   export SUBFLEET_RUN_LANE_LOG="$LANE_LOG"
-  # A final -p wins if the caller used either `-p path` or `-ppath`. The child
+  # ORIG_ARGS preserves every explicit -x exclusion in the child. A final -p
+  # wins if the caller used either `-p path` or `-ppath`. The child
   # runs in a NEW process session (setsid): plain nohup stays in the launching
   # shell's process group, which the desktop app SIGTERMs on pause/idle and
   # which dies with a Claude account switch. macOS has no setsid binary;

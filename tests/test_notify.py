@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -263,8 +264,14 @@ def _finished_run(tmp_path, *, session=SESSION) -> tuple[str, Path]:
     return run_id, out
 
 
-def test_finish_pushes_live_and_records_notify(registry, tmp_path, capsys):
-    _transcript(registry["claude_dir"], "bypassPermissions")
+def test_finish_pushes_live_and_records_notify(registry, tmp_path, capsys, monkeypatch):
+    """A delivered push is recorded as pushed but NOT surfaced: the inbox
+    accepting the bytes is not the session seeing them (2026-09-06 21:40).
+    The transcript confirms it; the follow-up worker is spawned to check."""
+    from subfleet import tickle
+    spawned = []
+    monkeypatch.setattr(tickle, "spawn_followup", lambda sid, **kw: spawned.append(sid) or 4242)
+    path = _transcript(registry["claude_dir"], "bypassPermissions")
     run_id, out = _finished_run(tmp_path)
     assert cli.main(["_record-run", "--phase", "finish", "--run-id", run_id, "--rc", "0"]) == 0
     lines = _wait_lines(registry["inbox"], 2)
@@ -272,13 +279,31 @@ def test_finish_pushes_live_and_records_notify(registry, tmp_path, capsys):
     assert f"subfleet: run {run_id} FINISHED" in content
     assert "first line: VERDICT: fine" in content
     _, meta = run_ledger.load_run(run_id)
-    assert meta["notify"]["pushed"] is True and meta["notify"]["surfaced"] is True
+    assert meta["notify"]["pushed"] is True and meta["notify"]["surfaced"] is False
     assert meta["notify"]["push"]["name"] == "tariff-lane"
-    assert notify.pending_notices(SESSION) == []  # delivered live: nothing parked
+    assert spawned == [SESSION], "the follow-up worker watches every unconfirmed push"
+    assert notify.pending_notices(SESSION) == []  # delivered live: nothing parked for the prompt hook
+    [row] = notify.unresolved_notices(SESSION)
+    assert row["run_id"] == run_id and row["session_id"] == SESSION and row["surfaced"] is False
     capsys.readouterr()
     assert cli.main(["runs", "--last", "1"]) == 0
     table = capsys.readouterr().out
     assert "pushed" in table and "tariff-lane" in table
+    # the transcript shows the notice (the harness wrote the inbox message as
+    # a user entry): confirmed, and the ledger reads "landed"
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    with path.open("a") as stream:
+        stream.write(json.dumps({"type": "user", "isMeta": True, "timestamp": stamp,
+                                 "message": {"role": "user", "content": "Another Claude session sent a message:\n"
+                                             + notify.envelope(content.split("\n", 1)[1].rsplit("\n", 1)[0])}}) + "\n")
+    confirmed = notify.confirm_surfaced(SESSION, path)
+    assert list(confirmed) == [run_id] and notify.unresolved_notices(SESSION) == []
+    [row] = notify._read_notices(notify.notices_path(SESSION))
+    assert row["surfaced"] is True and row["surfaced_by"] == "transcript" and row["surfaced_at"] == confirmed[run_id]
+    result = tickle.notice_followup(SESSION)
+    assert result["confirmed"] == [] and result["due"] == []  # already confirmed above; nothing to do
+    assert run_ledger._notify_state({"caller": {}, "finished_at": "t", "notify": {
+        "pushed": True, "surfaced": True, "surfaced_by": "transcript"}}) == "landed"
 
 
 def test_finish_parks_notice_when_session_is_down_and_hook_surfaces_it(tmp_path, capsys, monkeypatch):
