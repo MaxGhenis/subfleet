@@ -30,6 +30,8 @@
 #      via a temp index + commit-tree. HEAD, the current branch, the real
 #      index, and the worktree are never touched. Resume: the worktree is
 #      still dirty, so just keep working. List: git for-each-ref refs/claude-salvage
+#      `-b main` / `-b master` is refused (exit 2) up front: the salvage push
+#      force-pushes WIP onto that branch on EVERY exit.
 #   4. Silent model downgrades: after the run, the exact session transcript's
 #      per-message model field is checked (claude-model). The UUID-named
 #      transcript is located independently of Claude's lossy cwd encoding and
@@ -61,7 +63,9 @@
 #       only Read, Glob, and Grep are available. Inherited policy-file
 #       overrides are rejected, never silently bypassed
 #   -D  source directory exposed to an isolated reviewer; requires -I
-#   -b  salvage branch — on any exit, push the salvage snapshot (or HEAD) there
+#   -b  salvage branch — on any exit, push the salvage snapshot (or HEAD) there.
+#       main|master are refused (exit 2, before anything runs): that push
+#       force-pushes WIP onto the branch. Use e.g. -b claude-salvage/<lane>.
 #   -R  remote for the salvage push; default origin
 #   -r  max retries for transient failures; default 2
 #   -d  detach: re-exec in a NEW process session (setsid) and return at once;
@@ -154,6 +158,16 @@ elif [ -n "$REVIEW_ROOT" ]; then
   echo "subfleet claude: -D requires -I" >&2
   exit 2
 fi
+# Refuse a salvage branch named main/master before ANYTHING runs (no token
+# access, no ledger record, no detached child, no salvage trap): the salvage
+# push is `git push -qf <remote> <sha>:refs/heads/<branch>` on every exit,
+# success included — one typo away from force-pushing WIP onto main, the
+# exact harm corpus-push exists to prevent. Same refusal as subfleet-codex.
+case "$SALVAGE_BRANCH" in
+  main|master)
+    echo "subfleet claude: refusing -b main|master — the salvage push force-pushes WIP onto that branch; use a salvage branch name (e.g. -b claude-salvage/<lane>)" >&2
+    exit 2 ;;
+esac
 command -v jq >/dev/null || { echo "subfleet claude: jq required" >&2; exit 2; }
 command -v uuidgen >/dev/null || { echo "subfleet claude: uuidgen required" >&2; exit 2; }
 

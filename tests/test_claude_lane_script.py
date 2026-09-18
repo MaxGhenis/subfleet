@@ -251,6 +251,66 @@ def _captured_args(path: Path) -> list[str]:
     return [line[1:-1] for line in path.read_text().splitlines()]
 
 
+# A fixed identity and no host git config (global or system), so the fixture
+# commits and the runner's salvage commit-tree/push never depend on this
+# machine's init.defaultBranch, commit.gpgsign, core.hooksPath, or hooks.
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "subfleet-test",
+    "GIT_AUTHOR_EMAIL": "subfleet-test@example.com",
+    "GIT_COMMITTER_NAME": "subfleet-test",
+    "GIT_COMMITTER_EMAIL": "subfleet-test@example.com",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        env={**os.environ, **_GIT_IDENTITY},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout
+
+
+def _git_workdir_with_origin(tmp_path: Path, env: dict, workdir: Path) -> Path:
+    """Make the fixture workdir a repo with a bare origin (main pushed) and one
+    untracked file, so a salvage push has a branch to land on and something
+    dirty to snapshot."""
+    env.update(_GIT_IDENTITY)
+    origin = tmp_path / "origin.git"
+    for init_args in (
+        ["init", "-q", "--bare", "-b", "main", str(origin)],
+        ["init", "-q", "-b", "main", str(workdir)],
+    ):
+        subprocess.run(
+            ["git", *init_args],
+            env={**os.environ, **_GIT_IDENTITY},
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    _git(workdir, "commit", "-q", "--allow-empty", "-m", "init")
+    _git(workdir, "remote", "add", "origin", str(origin))
+    _git(workdir, "push", "-q", "origin", "main")
+    (workdir / "dirty.txt").write_text("wip\n")
+    return origin
+
+
+def _heads(repo: Path) -> dict[str, str]:
+    out = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
+    return dict(line.split() for line in out.splitlines())
+
+
+def _salvage_refs(repo: Path) -> dict[str, str]:
+    out = _git(
+        repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/claude-salvage"
+    )
+    return dict(line.split() for line in out.splitlines())
+
+
 def test_read_only_research_allows_web_tools_without_mutating_tools(tmp_path):
     args_file = tmp_path / "claude-args"
     env, paths = _fixture_env(
@@ -348,6 +408,85 @@ def test_isolated_review_requires_read_only_and_review_root(tmp_path):
     assert unpaired_root.returncode == 2
     assert "-D requires -I" in unpaired_root.stderr
     assert _hook_calls(paths["hook_log"]) == []
+
+
+SALVAGE_BRANCH_REFUSAL = (
+    "subfleet claude: refusing -b main|master — the salvage push force-pushes "
+    "WIP onto that branch; use a salvage branch name (e.g. -b claude-salvage/<lane>)"
+)
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [[], ["-d"], ["-A"], ["-s", "read-only", "-I", "-D", "{workdir}"]],
+)
+@pytest.mark.parametrize("bad_branch", ["main", "master"])
+def test_b_main_and_master_refused_before_anything(tmp_path, bad_branch, extra_args):
+    """Mirror of the Codex runner's refusal: the salvage trap force-pushes to
+    -b on EVERY exit, so main/master must be rejected before token access, the
+    ledger record, the detached re-exec, and the trap itself."""
+    env, paths = _fixture_env(
+        tmp_path,
+        ': > "$CLAUDE_RAN"\nprintf \'{"is_error":false,"result":"must not run"}\\n\'\n',
+    )
+    claude_ran = tmp_path / "claude-ran"
+    env["CLAUDE_RAN"] = str(claude_ran)
+    token_access = tmp_path / "token-access"
+    env["TOKEN_ACCESS"] = str(token_access)
+    env["CLAUDE_LANE_AGENT_SECRET"] = str(_write_executable(
+        paths["fake_bin"] / "tracked-agent-secret",
+        ': > "$TOKEN_ACCESS"\nprintf "test-token\\n"\n',
+    ))
+    # Every subfleet CLI call (ledger _record-run, _canonical-model, pick, the
+    # accounting hook) goes through this wrapper, so an empty log means none ran.
+    subfleet_calls = tmp_path / "subfleet-calls.log"
+    env["SUBFLEET_CALLS"] = str(subfleet_calls)
+    env["FIXTURE_SUBFLEET"] = env["CLAUDE_LANE_SUBFLEET"]
+    env["CLAUDE_LANE_SUBFLEET"] = str(_write_executable(
+        paths["fake_bin"] / "tracked-subfleet",
+        'printf \'%s\\n\' "$*" >> "$SUBFLEET_CALLS"\nexec "$FIXTURE_SUBFLEET" "$@"\n',
+    ))
+    env["CAPACITY_CANDIDATES"] = "lane@example.com"
+    origin = _git_workdir_with_origin(tmp_path, env, paths["workdir"])
+    origin_before = _heads(origin)
+
+    extra = [arg.replace("{workdir}", str(paths["workdir"])) for arg in extra_args]
+    result = _run(env, paths, "-a", "lane@example.com", "-b", bad_branch, *extra)
+
+    assert result.returncode == 2, result.stderr
+    assert SALVAGE_BRANCH_REFUSAL in result.stderr
+    assert "detached pid=" not in result.stdout, "must refuse before the detached re-exec"
+    assert "salvaged dirty state" not in result.stderr
+    assert "subfleet claude: pushed" not in result.stderr
+    assert not claude_ran.exists(), "claude must not run"
+    assert not token_access.exists(), "the lane token must not be read"
+    assert not subfleet_calls.exists(), "no ledger record, pick, or accounting call"
+    assert not paths["output"].exists()
+    assert _salvage_refs(paths["workdir"]) == {}, "the salvage trap must not have armed"
+    assert _heads(origin) == origin_before, "nothing may reach the remote"
+
+
+def test_salvage_branch_names_still_work(tmp_path):
+    """The refusal is exact: any other -b name still gets the on-exit salvage
+    push, and main on the remote is left alone."""
+    env, paths = _fixture_env(
+        tmp_path,
+        "printf '{\"is_error\":false,\"result\":\"finished\"}\\n'\n",
+    )
+    origin = _git_workdir_with_origin(tmp_path, env, paths["workdir"])
+    origin_before = _heads(origin)
+
+    result = _run(env, paths, "-a", "lane@example.com", "-b", "claude-salvage/lane")
+
+    assert result.returncode == 0, result.stderr
+    assert paths["output"].read_text().strip() == "finished"
+    assert "subfleet claude: pushed" in result.stderr
+    salvage = _salvage_refs(paths["workdir"])
+    assert len(salvage) == 1, salvage
+    (salvage_sha,) = salvage.values()
+    heads = _heads(origin)
+    assert heads.pop("refs/heads/claude-salvage/lane") == salvage_sha
+    assert heads == origin_before
 
 
 def test_isolated_review_keeps_source_only_tools_and_validated_review_root(tmp_path):
