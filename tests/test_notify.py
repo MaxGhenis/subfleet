@@ -216,12 +216,13 @@ def test_notices_append_pending_mark_and_prune(tmp_path):
     assert [row["run_id"] for row in pending] == ["r1"]
     assert pending[0]["text"] == "one-rewritten"
     assert [row["run_id"] for row in notify.pending_notices(SESSION, include_pushed=True)] == ["r1"]
-    assert notify.mark_surfaced(SESSION, ["r1"]) == 1
+    from datetime import datetime, timezone
+    surfaced_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert notify.mark_surfaced(SESSION, ["r1"], at=surfaced_at) == 1
     assert notify.pending_notices(SESSION) == []
     assert notify.mark_surfaced(SESSION, ["r1"]) == 0
     path = notify.notices_path(SESSION)
     assert path.exists() and oct(path.stat().st_mode & 0o777) == "0o600"
-    from datetime import datetime, timezone
     removed = notify.prune_notices(max_age_days=14, now=datetime(2026, 9, 30, tzinfo=timezone.utc))
     assert removed == 2 and not path.exists()
 
