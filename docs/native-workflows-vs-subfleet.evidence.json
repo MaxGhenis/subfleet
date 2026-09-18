@@ -1,0 +1,837 @@
+{
+ "measured": "2026-09-17",
+ "versions": {
+  "claude_code": "2.1.274",
+  "codex_cli": "0.153.3",
+  "subfleet_v1_head": "519c9fc7 + working tree"
+ },
+ "native_mapping_run": {
+  "run_id": "wf_11aabbdb-9e5",
+  "duration_ms": 929746,
+  "total_tokens": 2410406,
+  "tool_calls": 489,
+  "agents": [
+   {
+    "label": "read:dispatch-routing",
+    "model": "claude-fable-5-1",
+    "durationMs": 244507,
+    "tokens": 181965,
+    "toolCalls": 35,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:runners",
+    "model": "claude-fable-5-1",
+    "durationMs": 363353,
+    "tokens": 239234,
+    "toolCalls": 41,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:ledger-lifecycle",
+    "model": "claude-fable-5-1",
+    "durationMs": 329648,
+    "tokens": 189154,
+    "toolCalls": 38,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:completion-signaling",
+    "model": "claude-fable-5-1",
+    "durationMs": 322920,
+    "tokens": 205715,
+    "toolCalls": 41,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:agreement-gates",
+    "model": "claude-fable-5-1",
+    "durationMs": 294409,
+    "tokens": 195579,
+    "toolCalls": 40,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:capacity-reserve",
+    "model": "claude-fable-5-1",
+    "durationMs": 399469,
+    "tokens": 275184,
+    "toolCalls": 54,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:guards",
+    "model": "claude-fable-5-1",
+    "durationMs": 396317,
+    "tokens": 260583,
+    "toolCalls": 44,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "read:subfleet-v2",
+    "model": "claude-fable-5-1",
+    "durationMs": 361707,
+    "tokens": 344461,
+    "toolCalls": 61,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "native-docs",
+    "model": "claude-haiku-4-5-20251001",
+    "durationMs": 173349,
+    "tokens": 112216,
+    "toolCalls": 14,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "native-on-disk",
+    "model": "claude-fable-5-1",
+    "durationMs": 927368,
+    "tokens": 191004,
+    "toolCalls": 68,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "ledger-stats",
+    "model": "claude-fable-5-1",
+    "durationMs": 804703,
+    "tokens": 215311,
+    "toolCalls": 53,
+    "state": "done",
+    "attempt": 1
+   }
+  ]
+ },
+ "composition_verify_run": {
+  "run_id": "wf_78f6f13c-21d",
+  "duration_ms": 1015563,
+  "total_tokens": 470500,
+  "tool_calls": 55,
+  "agents": [
+   {
+    "label": "shim:V1",
+    "model": "claude-haiku-4-5-20251001",
+    "durationMs": 482793,
+    "tokens": 40644,
+    "toolCalls": 3,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "shim:V2",
+    "model": "claude-haiku-4-5-20251001",
+    "durationMs": 529596,
+    "tokens": 40627,
+    "toolCalls": 3,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "shim:V3",
+    "model": "claude-haiku-4-5-20251001",
+    "durationMs": 478426,
+    "tokens": 40752,
+    "toolCalls": 3,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "shim:V4",
+    "model": "claude-haiku-4-5-20251001",
+    "durationMs": 249267,
+    "tokens": 40640,
+    "toolCalls": 3,
+    "state": "done",
+    "attempt": 1
+   },
+   {
+    "label": "critic",
+    "model": "claude-fable-5-1",
+    "durationMs": 1011920,
+    "tokens": 307837,
+    "toolCalls": 43,
+    "state": "done",
+    "attempt": 1
+   }
+  ]
+ },
+ "subfleet_runs": {
+  "20260917-152230-h2h-gates-reader": {
+   "started_at": "2026-09-17T15:22:30-04:00",
+   "finished_at": "2026-09-17T15:29:21-04:00",
+   "duration_s": 411.396,
+   "rc": 0,
+   "model": "claude-opus-5",
+   "family": "claude",
+   "launcher": "subfleet run",
+   "notify": {
+    "pushed": true,
+    "surfaced": true,
+    "surfaced_by": "transcript",
+    "at": "2026-09-17T15:29:22-04:00",
+    "surfaced_at": "2026-09-17T19:29:22+00:00"
+   },
+   "routing": {
+    "task": "research",
+    "tier": "standard",
+    "class": "research",
+    "requested_model": "opus",
+    "model": "opus",
+    "routing_candidates": [
+     "opus",
+     "astra"
+    ],
+    "routing_capacity_states": {
+     "opus": true,
+     "astra": false
+    },
+    "routing_history": [],
+    "routing_note": null,
+    "reserve": null
+   },
+   "lane_tokens": {
+    "total_tokens": 1571859,
+    "output_tokens": 29473,
+    "definition": "input + cache_creation + cache_read + output, from the lane session transcript"
+   }
+  },
+  "20260917-154603-verify-v1": {
+   "started_at": "2026-09-17T15:46:03-04:00",
+   "finished_at": "2026-09-17T15:53:29-04:00",
+   "duration_s": 446.539,
+   "rc": 0,
+   "model": "claude-opus-5",
+   "family": "claude",
+   "launcher": "subfleet run",
+   "notify": {
+    "pushed": false,
+    "surfaced": true,
+    "surfaced_by": "inline-waiter",
+    "at": "2026-09-17T15:53:29-04:00",
+    "surfaced_at": null
+   },
+   "routing": {
+    "task": "review",
+    "tier": "standard",
+    "class": "review",
+    "requested_model": "opus",
+    "model": "opus",
+    "routing_candidates": [
+     "opus",
+     "astra"
+    ],
+    "routing_capacity_states": {
+     "opus": true,
+     "astra": false
+    },
+    "routing_history": [],
+    "routing_note": null,
+    "reserve": null
+   },
+   "lane_tokens": {
+    "total_tokens": 1401323,
+    "output_tokens": 33478,
+    "definition": "input + cache_creation + cache_read + output, from the lane session transcript"
+   }
+  },
+  "20260917-154603-verify-v2": {
+   "started_at": "2026-09-17T15:46:03-04:00",
+   "finished_at": "2026-09-17T15:54:19-04:00",
+   "duration_s": 495.98,
+   "rc": 0,
+   "model": "claude-opus-5",
+   "family": "claude",
+   "launcher": "subfleet run",
+   "notify": {
+    "pushed": false,
+    "surfaced": true,
+    "surfaced_by": "inline-waiter",
+    "at": "2026-09-17T15:54:19-04:00",
+    "surfaced_at": null
+   },
+   "routing": {
+    "task": "review",
+    "tier": "standard",
+    "class": "review",
+    "requested_model": "opus",
+    "model": "opus",
+    "routing_candidates": [
+     "opus",
+     "astra"
+    ],
+    "routing_capacity_states": {
+     "opus": true,
+     "astra": false
+    },
+    "routing_history": [],
+    "routing_note": null,
+    "reserve": null
+   },
+   "lane_tokens": {
+    "total_tokens": 2248909,
+    "output_tokens": 36989,
+    "definition": "input + cache_creation + cache_read + output, from the lane session transcript"
+   }
+  },
+  "20260917-154603-verify-v3": {
+   "started_at": "2026-09-17T15:46:03-04:00",
+   "finished_at": "2026-09-17T15:53:29-04:00",
+   "duration_s": 446.362,
+   "rc": 0,
+   "model": "claude-opus-5",
+   "family": "claude",
+   "launcher": "subfleet run",
+   "notify": {
+    "pushed": false,
+    "surfaced": true,
+    "surfaced_by": "inline-waiter",
+    "at": "2026-09-17T15:53:29-04:00",
+    "surfaced_at": null
+   },
+   "routing": {
+    "task": "review",
+    "tier": "standard",
+    "class": "review",
+    "requested_model": "opus",
+    "model": "opus",
+    "routing_candidates": [
+     "opus",
+     "astra"
+    ],
+    "routing_capacity_states": {
+     "opus": true,
+     "astra": false
+    },
+    "routing_history": [],
+    "routing_note": null,
+    "reserve": null
+   },
+   "lane_tokens": {
+    "total_tokens": 4032830,
+    "output_tokens": 32232,
+    "definition": "input + cache_creation + cache_read + output, from the lane session transcript"
+   }
+  },
+  "20260917-154558-verify-v4": {
+   "started_at": "2026-09-17T15:45:58-04:00",
+   "finished_at": "2026-09-17T15:49:39-04:00",
+   "duration_s": 221.079,
+   "rc": 0,
+   "model": "claude-opus-5",
+   "family": "claude",
+   "launcher": "subfleet run",
+   "notify": {
+    "pushed": false,
+    "surfaced": true,
+    "surfaced_by": "inline-waiter",
+    "at": "2026-09-17T15:49:39-04:00",
+    "surfaced_at": null
+   },
+   "routing": {
+    "task": "review",
+    "tier": "standard",
+    "class": "review",
+    "requested_model": "opus",
+    "model": "opus",
+    "routing_candidates": [
+     "opus",
+     "astra"
+    ],
+    "routing_capacity_states": {
+     "opus": true,
+     "astra": false
+    },
+    "routing_history": [],
+    "routing_note": null,
+    "reserve": null
+   },
+   "lane_tokens": {
+    "total_tokens": 1170075,
+    "output_tokens": 17752,
+    "definition": "input + cache_creation + cache_read + output, from the lane session transcript"
+   }
+  }
+ },
+ "login_gauges": {
+  "source": "desktop app usage card for this session's account, read with the session tool get_usage; account-wide",
+  "readings": [
+   {
+    "at": "about 15:19 EDT, before the mapping run",
+    "five_hour_pct": 9,
+    "weekly_all_pct": 27,
+    "weekly_fable_pct": 45
+   },
+   {
+    "at": "about 15:41 EDT, after the mapping run",
+    "five_hour_pct": 63,
+    "weekly_all_pct": 40,
+    "weekly_fable_pct": 70
+   },
+   {
+    "at": "about 16:04 EDT, after the composition run",
+    "five_hour_pct": 81,
+    "weekly_all_pct": 44,
+    "weekly_fable_pct": 77
+   }
+  ],
+  "resets": {
+   "five_hour": "2026-09-18T00:10Z",
+   "weekly": "2026-09-23T06:00Z"
+  }
+ },
+ "verifier_verdicts": {
+  "V1": {
+   "verifier": "V1-dispatch-runners",
+   "verdicts": [
+    {
+     "id": "Control flow",
+     "verdict": "imprecise",
+     "evidence": "subfleet/delegate.py:328-370, 841-1442; subfleet/consensus.py:1142; subfleet/handoff.py:607-655; subfleet/cli.py:1850-1855",
+     "correction": "The mechanism half is right: _parser (328-370) exposes no step/dependency/fan-out/schema flag and main() (841-1442) is one dispatch with a lane-retry loop. But of the two constructs built on delegate.main, only `gate` is multi-round (consensus.py:1142 dispatches one peer per round); `handoff` (handoff.py:612, 655) builds on delegate.main yet dispatches exactly one run. The third caller is the plain `subfleet run` CLI passthrough (cli.py:1850-1855)."
+    },
+    {
+     "id": "Worker",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:811-831 (invocation at 826-829); bin/subfleet-codex:559-570 (codex exec -o at 560-568); subfleet/delegate.py:765-789, 1142-1193 (start_run at 1152, Popen(['nohup', *cmd], start_new_session=True) at 1170-1177)",
+     "correction": ""
+    },
+    {
+     "id": "Models",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:92-106 (grid), 107-112 (UPWARD_MODEL_CHAINS), 735-746 (select_semantic_model never moves down-tier), 1077-1106 (fable floor returns rc 3, 'refusing cross-family downgrade')",
+     "correction": ""
+    },
+    {
+     "id": "Output contract",
+     "verdict": "imprecise",
+     "evidence": "bin/subfleet-claude:833-844; bin/subfleet-codex:571, 620-624; no --json-schema/--output-schema token anywhere in bin/ (grep)",
+     "correction": "Free text in a file. Claude success is rc 0 AND a non-empty raw envelope that jq accepts as an object with is_error==false and a non-empty string .result, written out non-empty (bin/subfleet-claude:833-843) — i.e. the CLI envelope is checked, though not the content. Codex success is rc 0 AND a non-empty -o file, and the test lives at bin/subfleet-codex:571; the cited 620-624 is the failure tail that rewrites rc 0/4/8 to 1. Neither runner passes a schema flag."
+    },
+    {
+     "id": "Worker context",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:787-788 (workspace-write = --dangerously-skip-permissions only), 796-809 (plan mode, --tools/--allowedTools Read,Glob,Grep + WebSearch,WebFetch unless -I, empty --setting-sources, --safe-mode, --strict-mcp-config with empty config), 815-825 (CLAUDE.md/memory env disabled), 811-812 (cd WORKDIR); bin/subfleet-codex:484-499 (guard override + preflight or exit 2), 562-567 (--sandbox, -C WORKDIR); no worktree creation in bin/ (grep)",
+     "correction": ""
+    },
+    {
+     "id": "Budget",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:826-830 (flags are -p --model --session-id --output-format json plus PERM_ARGS); bin/subfleet-codex:559-569; no --max-turns and no timeout wrapper on either provider call (grep of bin/)",
+     "correction": ""
+    },
+    {
+     "id": "Failure handling",
+     "verdict": "imprecise",
+     "evidence": "bin/subfleet-claude:778, 852-916 (hard limit 882-896, transient 897-909, auth 857-878), 337-372, 436-448; bin/subfleet-codex:531-545; subfleet/delegate.py:1358-1359",
+     "correction": "The runner classifies failure text: a hard limit re-picks a lane ONLY when it was launched with -A (bin/subfleet-claude:885; MAX_RETRIES=2 at :107, so up to 2 re-picks) and restarts the task under a fresh session id (:778); a pinned -a lane exits 4 with no re-pick, and `subfleet run` passes -A only on detached, unpinned dispatches (delegate.py:1358-1359). Transient errors back off on the same lane; an auth-failure signature exits 5 only if the lane token does not still authenticate, otherwise it is retried as transient (:868-878). Every exit snapshots a dirty worktree to refs/{claude,codex}-salvage/* without touching HEAD or the index — and, when -b was given, the same salvage function force-pushes to that remote branch (:367-371)."
+    },
+    {
+     "id": "Guardrails",
+     "verdict": "imprecise",
+     "evidence": "bin/subfleet-hook:40-43, 45-68; tests/test_hooks.py:100-145",
+     "correction": "The hook parses only .tool_input.command (bin/subfleet-hook:42) and reads no agent identity — confirmed. It blocks `subfleet codex`/`subfleet claude`, `codex-run`/`claude-lane`/`subfleet-codex`/`subfleet-claude` and `codex exec|e|review` only in command position (47-59), and exempts any command whose text contains `SUBFLEET_ATTACHED_OK=1` (46) or, for the subfleet runners, a bare `-d` token anywhere (62-67). `subfleet run` with any flags passes because it never matches the prefilter or the offender test (tests/test_hooks.py:124-125). The block message itself is at :68, outside the cited range."
+    },
+    {
+     "id": "Outside a session",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:765-789 (sync at 789 outside a session, detached at 785-788 inside one); ~/chief-of-staff/launchd/com.maxghenis.cos.subfleet.plist:9-11 (bin/subfleet-watch every 1800 s), com.maxghenis.cos.subfleet-keepalive.plist:9-11, com.maxghenis.cos.subfleet-revive.plist:16-26",
+     "correction": ""
+    },
+    {
+     "id": "breaks-detached-promotion",
+     "verdict": "imprecise",
+     "evidence": "subfleet/delegate.py:1255-1277, 1370-1374, 1375-1434, 1436-1442",
+     "correction": "A detached run never changes model at runtime — true — but the explicit `mode != 'detached'` guard at :1255 covers the Codex path only. On the Claude path there is no such guard: the runtime cooldown, lane retry and upward promotion all live inside the synchronous branch (1375-1434), so they are structurally unreachable when detached. With --attach the inline wait returns the ledger rc (1373-1374) and falls through to the return at 1436-1442, so an in-session dispatch relies on the runner's own -A lane re-pick alone."
+    },
+    {
+     "id": "breaks-unbounded",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:826-830; bin/subfleet-codex:559-569; no turn, time or token cap flag and no timeout wrapper in either runner (grep of bin/)",
+     "correction": ""
+    },
+    {
+     "id": "D1a",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:1255-1277 (Codex promotion gated on mode != 'detached'), 1370-1374 (detached/--attach branch), 1375-1434 (Claude promotion and retry inside the sync branch)",
+     "correction": ""
+    },
+    {
+     "id": "D1b",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:136-152 (fallback `return \"build\"`), 890 (sandbox defaults to workspace-write for class build when -s is absent); bin/subfleet-claude:787-788",
+     "correction": ""
+    },
+    {
+     "id": "D1c",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:22-28 (FABLE_PATTERNS includes voice, emails?, launch(es|ed|ing)?, send(s|ing)?, design(s|ed|ing)?), 136-147 (fable signal wins first), 186 (fable class -> fable model)",
+     "correction": ""
+    },
+    {
+     "id": "D1d",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:241 (sole definition); tests/test_delegate.py:268-277 (only references); repo-wide grep finds no other call site under subfleet/ or bin/",
+     "correction": ""
+    },
+    {
+     "id": "D1e",
+     "verdict": "confirmed",
+     "evidence": "bin/codex:37-47 (one pick when CODEX_HOME is unset), 56 (exec of the real binary); README.md:100-102",
+     "correction": ""
+    },
+    {
+     "id": "D1f",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:857-859 (comment: 'same class as a dead token: rotate, long cooldown'), 871-877 (exit 5, no re-pick, independent of AUTO/-A), 885-895 (re-pick exists only on the hard-limit path)",
+     "correction": ""
+    },
+    {
+     "id": "D1g",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:110-132 (-b parsed with no branch-name validation), 367-371 (push -qf on every salvage), 436-448 (salvage called from the EXIT trap); bin/subfleet-codex:148-152 (refuses -b main|master with exit 2)",
+     "correction": ""
+    },
+    {
+     "id": "D1h",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:249 (DOWNGRADED_FILE), 755-761 (stderr warning tee'd into the marker, no rc change), 838-843 (check_model runs immediately before `exit 0`)",
+     "correction": ""
+    },
+    {
+     "id": "D1i",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-hook:46 (SUBFLEET_ATTACHED_OK=1 matched anywhere in the command text, only word-boundary anchored), 51-59 (cmdpos restricts offenders to command position, so an offender inside `bash -c \"...\"` never matches), 62-67 (a `-d` token anywhere exits 0 for every offender except bare codex exec)",
+     "correction": ""
+    },
+    {
+     "id": "D1j",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-hook:68 (block text advertises `subfleet run -m sol|terra|fable`); subfleet/delegate.py:69-73 (sol retired, remapped to astra)",
+     "correction": ""
+    }
+   ],
+   "extra_findings": [
+    "'Whose quota' row (doc line 79) mis-cites the token injection: bin/subfleet-claude:500-508 only fetches the keychain secret; CLAUDE_CODE_OAUTH_TOKEN is injected at bin/subfleet-claude:826. The paired citation 813-814 (unset ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) is correct. The same 500-508 citation is reused at doc line 45.",
+    "'Failure handling' row (doc line 88) says salvage happens 'without touching HEAD or the index' but omits the remote side effect: when -b was passed, the EXIT-trap salvage force-pushes ${salvage_sha:-HEAD} to refs/heads/<branch> on every exit, success included (bin/subfleet-claude:367-371; bin/subfleet-codex:531-535). This is the mechanism behind defect D1g and belongs in the comparison, not only in the defects list.",
+    "'Worker context' row (doc line 83) states the Codex guard preflight as absolute; it is skipped entirely for independent review (-I) and when SUBFLEET_CODEX_GUARD=off (bin/subfleet-codex:489-493).",
+    "'Outside a session' row (doc line 89) omits the explicit overrides: -d and SUBFLEET_RUN_DETACH=1 detach anywhere, and SUBFLEET_RUN_DETACH=0 forces the synchronous path even inside a Claude session (subfleet/delegate.py:776-789).",
+    "Doc line 82 ('Output contract') and line 86 ('Guardrails') both cite ranges that stop one line short of the code they describe: the Codex success test is bin/subfleet-codex:571 (not 620-624) and the hook's block call is bin/subfleet-hook:68 (not within 45-67)."
+   ]
+  },
+  "V2": {
+   "verifier": "V2-ledger-signaling",
+   "verdicts": [
+    {
+     "id": "Durability",
+     "verdict": "confirmed",
+     "evidence": "bin/subfleet-claude:425-449; subfleet/run_ledger.py:849-875; subfleet/cli.py:810-815; subfleet/run_ledger.py:70-81,231-308; subfleet/delegate.py:1152-1177; subfleet/resume_codex.py:69-77; subfleet/handoff.py:28,616-617",
+     "correction": ""
+    },
+    {
+     "id": "Completion signal",
+     "verdict": "imprecise",
+     "evidence": "subfleet/notify.py:183-217,357-383,403-404,962-1005; subfleet/tickle.py:1388-1392,1500-1544,1583-1606; subfleet/liveness.py:194-212,310-311",
+     "correction": "Not every notice is written to notices/<session>.jsonl and transcript/hook are not the only confirmations: when a live `--attach` inline waiter owns the run, on_finish returns a notice marked surfaced at finish time with surfaced_by 'inline-waiter' and never pushes it or calls append_notice (notify.py:978-988). Suggested wording: '...so a pushed notice is also written to notices/<session>.jsonl and confirmed only by transcript evidence or a hook render; a run whose inline --attach waiter is still alive is reported by that waiter instead and gets no push and no notice file.' Everything else in the cell checks out: session-id addressing at finish time (notify.py:183-217, 962-989), no acknowledgement read (notify.py:357-383, 403-404), 300 s grace and one re-push then LOST (tickle.py:1388-1392, 1500-1544), a one-shot `claude -p --resume` host only for a bypassPermissions session (tickle.py:1583-1606, 1291-1300), Telegram for dead sessions with pending work (liveness.py:159-247, 310-311)."
+    },
+    {
+     "id": "Audit trail",
+     "verdict": "imprecise",
+     "evidence": "subfleet/run_ledger.py:271-304,509-572,21-22,589-617; subfleet/delegate.py:289-293,1021-1054,1274,1423,1431,1436",
+     "correction": "meta.json fields and the per-attempt decisions.jsonl line are accurate (run_ledger.py:271-304, 509-572; delegate.py:289-293, 1021-1054, with a line also written for attempts refused before dispatch, delegate.py:1105,1116). The retention clause needs a qualifier: the 500-run / 2 GiB caps trigger pruning, but only finished (or meta-less) entries are removable — _prunable refuses any entry with finished_at None (run_ledger.py:614-617) — so unfinished entries never age out and the directory can exceed both caps."
+    },
+    {
+     "id": "breaks-run-belongs-to-process",
+     "verdict": "confirmed",
+     "evidence": "subfleet/tickle.py:151-164,383-408; subfleet/liveness.py:194-212",
+     "correction": ""
+    },
+    {
+     "id": "breaks-no-receipt",
+     "verdict": "imprecise",
+     "evidence": "subfleet/notify.py:8-18,258-274,403-404,433-440; subfleet/lanes.py:36-47",
+     "correction": "The mechanism parts hold: delivery means the socket accepted the bytes (notify.py:403-404, 433-440), and the confirm / re-push / lost / revive / Telegram layers rest on the session registry, the peer-token key file, the socket protocol, the envelope and transcript field names (notify.py:8-18, 258-274; lanes.py:61-69). The 2.1.263 note over-attributes: lanes.py:36-46 records that the desktop app 'now' tags typed prompts promptSource: sdk and that the 172 affected desktop sessions were running Claude Code 2.1.263 — it does not establish which release introduced the change. Suggested wording: 'A Claude Code behaviour change, measured 2026-09-07 on 2.1.263, already broke lane detection once (lanes.py:36-47).' (Also note the code cites lanes.py:36-46; line 47 is the closing quote.)"
+    },
+    {
+     "id": "D2a",
+     "verdict": "confirmed",
+     "evidence": "subfleet/run_ledger.py:849-875; subfleet/cli.py:810-815,736-744,751-774; tests/test_wait_kill.py:114-124",
+     "correction": ""
+    },
+    {
+     "id": "D2b",
+     "verdict": "confirmed",
+     "evidence": "subfleet/run_ledger.py:733-736,862-863,614-617,787-791,1002-1009; tests/test_wait_kill.py:121-124",
+     "correction": ""
+    },
+    {
+     "id": "D2c",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:863-870; subfleet/run_ledger.py:826-829,868-874,458-462",
+     "correction": ""
+    },
+    {
+     "id": "D2d",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:1540-1541,888; subfleet/run_ledger.py:897-919",
+     "correction": ""
+    },
+    {
+     "id": "D2e",
+     "verdict": "imprecise",
+     "evidence": "subfleet/cli.py:1539-1541,884-897,18; subfleet/run_ledger.py:878-919,935-946; README.md:26,77; tests/test_wait_kill.py:127-143",
+     "correction": "`subfleet kill` defaults to a 10-second grace (cli.py:1540) and then SIGKILLs the run's process tree — the whole process group only when the runner pid leads its own group (detached launches use start_new_session), otherwise just that pid (run_ledger.py:935-946) — while README.md:26,77 and the cli module docstring (cli.py:18) describe SIGTERM only. Note the --grace help text at cli.py:1541 does mention the SIGKILL escalation."
+    },
+    {
+     "id": "D2f",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:986-994; subfleet/notify.py:548-566,806-840",
+     "correction": ""
+    },
+    {
+     "id": "D2g",
+     "verdict": "confirmed",
+     "evidence": "subfleet/notify.py:843-869; tests/test_notify.py:212-226",
+     "correction": ""
+    },
+    {
+     "id": "D2h",
+     "verdict": "confirmed",
+     "evidence": "subfleet/resume_codex.py:69-77,199-220; subfleet/delegate.py:1168-1177",
+     "correction": ""
+    },
+    {
+     "id": "D2i",
+     "verdict": "confirmed",
+     "evidence": "subfleet/handoff.py:28,616-617; subfleet/cli.py:1566,15; README.md:422",
+     "correction": ""
+    },
+    {
+     "id": "D2j",
+     "verdict": "confirmed",
+     "evidence": "subfleet/tickle.py:88-91,452-454,481-484; README.md:199-202",
+     "correction": ""
+    },
+    {
+     "id": "D2k",
+     "verdict": "confirmed",
+     "evidence": "subfleet/run_ledger.py:682-703; README.md:395-396",
+     "correction": ""
+    }
+   ],
+   "extra_findings": [
+    "Lines 104-105 ('the 500-run cap makes this a sample of 2026-09-11 to 09-17') inherit the pruning exception: unfinished entries are never pruned (run_ledger.py:614-617), so the ledger directory can hold more than 500 entries and the 7 orphans cited at line 159 sit outside the stated six-day window. The sample framing should say the cap bounds the finished entries only.",
+    "Line 80's remedy is conditional: an entry that recorded no runner pid is skipped by reap_orphans (run_ledger.py:862-863; tests/test_wait_kill.py:124), so 'stays unfinished until someone runs `subfleet runs reap`' is true only for entries carrying a pid — for the rest nothing in v1 ever finalizes them.",
+    "Line 117 ('52 confirmed (25 in the transcript, 27 by an inline waiter)') contradicts the mechanism row at line 81, which says a notice is 'confirmed only by transcript evidence or a hook render'. The inline-waiter path is a third confirmation and is the majority of the doc's own confirmations (notify.py:978-988).",
+    "Line 89 ('Synchronous outside a session, detached inside one, delegate.py:765-789') is accurate for `subfleet run` only; `subfleet resume-codex` is synchronous everywhere (resume_codex.py:204), which is worth stating since the same row lists resume among subfleet's durability story at line 80."
+   ]
+  },
+  "V3": {
+   "verifier": "V3-capacity-gates",
+   "verdicts": [
+    {
+     "id": "Concurrency",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:555-607; subfleet/capacity.py:1306-1324,1334-1373",
+     "correction": ""
+    },
+    {
+     "id": "Whose quota",
+     "verdict": "imprecise",
+     "evidence": "bin/subfleet-claude:500-508,813-814,826; bin/subfleet-codex:291-313,560-568; subfleet/delegate.py:568-607; subfleet/reserve.py:58-86,175-188,363-382",
+     "correction": "The active desktop login does not sort last unconditionally: in delegate._capacity_candidates the fable_stranded key precedes the active key (delegate.py:597-607), so for a non-Fable model a Fable-exhausted desktop login ranks ahead of every non-stranded lane; within the score it is only a 10-point handicap (delegate.py:568-574). The reserve clause should read: the default policy (cap_ratio 2.0, min_slack 0.05) is overridable by reserve-policy.json (reserve.py:58-86); an account whose usage payload carries no Fable window passes with no slack test, and an unmeasured account is withheld (reserve.py:180-188, 380-382). The OAuth token is injected at bin/subfleet-claude:826; 500-508 is the keychain fetch and 813-814 only unsets the API keys."
+    },
+    {
+     "id": "Agreement",
+     "verdict": "imprecise",
+     "evidence": "subfleet/consensus.py:268-291,848-858,1000-1004,1086-1097,1112-1132,1160-1181,1288,1337; bin/subfleet-claude:787-809",
+     "correction": "The peer's cwd is a neutral temp dir, but for a PR gate the peer's --review-root is the caller's live checkout, exposed to the peer with --add-dir (consensus.py:1112-1117; bin/subfleet-claude:809); only the patch/snapshot copy is immutable. 'On another account' is not enforced anywhere in consensus.py: the peer runs on whatever lane the capacity rules pick, and the active desktop login is deprioritised, not excluded (delegate.py:591-607; capacity.py:1338-1341). The rest of the cell (exact fingerprint, pinned peer, separate process, read-only, fail-closed verdict parsing, merge recheck plus --match-head-commit) holds."
+    },
+    {
+     "id": "D3a",
+     "verdict": "confirmed",
+     "evidence": "subfleet/delegate.py:611-620,1289-1297,1354-1365; bin/subfleet-claude:472-498,885-896; subfleet/cli.py:229-368,371-377",
+     "correction": ""
+    },
+    {
+     "id": "D3b",
+     "verdict": "confirmed",
+     "evidence": "subfleet/capacity.py:126-127,474-498,646-682; bin/subfleet-claude:106,205-208,599-610; subfleet/cli.py:637-659,1802-1809",
+     "correction": ""
+    },
+    {
+     "id": "D3c",
+     "verdict": "confirmed",
+     "evidence": "README.md:171-177; subfleet/capacity.py:455-471,1136-1173",
+     "correction": ""
+    },
+    {
+     "id": "D3d",
+     "verdict": "imprecise",
+     "evidence": "subfleet/delegate.py:568-574,591-607; subfleet/capacity.py:1334-1341,1376-1382; subfleet/cli.py:326,357-367,1733-1736",
+     "correction": "The three-way divergence is real, but two details are off: delegate._capacity_candidates does not sort the login last outright — the active flag is the second sort key, behind fable_stranded (delegate.py:597-607) — and it also applies the same 10-point INTERACTIVE_HANDICAP inside the score (delegate.py:568-574). capacity._best_dispatchable is not a dispatch picker; it is the 'best lane' helper behind family_summaries (capacity.py:1376-1382), while cli 'pick claude' (cli.py:326,357-367) is the ranker the Claude runner actually shells out to."
+    },
+    {
+     "id": "D3e",
+     "verdict": "confirmed",
+     "evidence": "subfleet/consensus.py:36,527-557,1164-1169,1274-1284; subfleet/delegate.py:41-53",
+     "correction": ""
+    },
+    {
+     "id": "D3f",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:1569-1629; subfleet/consensus.py:972-984,1565-1570",
+     "correction": ""
+    },
+    {
+     "id": "D3g",
+     "verdict": "confirmed",
+     "evidence": "subfleet/consensus.py:369-385,1000-1003,1088-1097,1112-1117,1158-1163,1288,1337; bin/subfleet-claude:809",
+     "correction": ""
+    },
+    {
+     "id": "D3h",
+     "verdict": "confirmed",
+     "evidence": "subfleet/consensus.py:31,1026-1037,1217-1219; subfleet/cli.py:1592-1595,1624-1627",
+     "correction": ""
+    },
+    {
+     "id": "D3i",
+     "verdict": "confirmed",
+     "evidence": "subfleet/capacity.py:541-554,659-682; subfleet/delegate.py:1385-1400; bin/subfleet-claude:882-896",
+     "correction": ""
+    }
+   ],
+   "extra_findings": [
+    "Failure-handling row (line 88): 'Every exit snapshots a dirty worktree to refs/{claude,codex}-salvage/*' overstates it — the EXIT trap runs salvage only when cleanup_owned_prompt succeeds; if the owned prompt cannot be removed the run exits with a warning and no salvage or push (bin/subfleet-claude:437-446, 337-372).",
+    "Concurrency row precision caveat (the dispatch claim itself holds): in_flight is not display-only for Codex everywhere — reset_policy uses it as a tiebreak when ordering Codex homes for reset redemption (subfleet/reset_policy.py:130-152). Consider scoping the wording to dispatch ranking.",
+    "Caveat for whoever writes up D3f in the PENDING defects section: there is no gate list/status/abort subcommand, but `subfleet gate continue <id> --dry-run` returns the gate's effective state without --main-approve and without dispatching a peer (subfleet/consensus.py:1362-1470; tests/test_consensus.py:781-809), so a per-gate read surface does exist."
+   ]
+  },
+  "V4": {
+   "verifier": "V4-subfleet-v2",
+   "verdicts": [
+    {
+     "id": "V2-1",
+     "verdict": "confirmed",
+     "evidence": "subfleet/default_policy.json:96-99; subfleet/scheduler.py:164-165; subfleet/scheduler.py:207-213; subfleet/daemon.py:1431-1438",
+     "correction": ""
+    },
+    {
+     "id": "V2-2",
+     "verdict": "confirmed",
+     "evidence": "subfleet/daemon.py:551-563; subfleet/store_schema.sql:67-69; subfleet/ids.py:54-62",
+     "correction": ""
+    },
+    {
+     "id": "V2-3",
+     "verdict": "confirmed",
+     "evidence": "subfleet/daemon.py:1990-1995; subfleet/daemon.py:2019-2021; subfleet/daemon.py:1408-1418",
+     "correction": ""
+    },
+    {
+     "id": "V2-4",
+     "verdict": "confirmed",
+     "evidence": "subfleet/daemon.py:1085-1094; subfleet/daemon.py:1403-1404; subfleet/cli.py:1906-1907",
+     "correction": ""
+    },
+    {
+     "id": "V2-5",
+     "verdict": "confirmed",
+     "evidence": "subfleet/store_schema.sql:1-229; subfleet/store_schema.sql:66-109",
+     "correction": ""
+    },
+    {
+     "id": "V2-6",
+     "verdict": "confirmed",
+     "evidence": "subfleet/contracts.py:37-41; subfleet/daemon.py:1155; subfleet/daemon.py:1377-1379; subfleet/daemon.py:1436-1437; subfleet/daemon.py:1474; subfleet/daemon.py:2020-2021; subfleet/scheduler.py:338",
+     "correction": ""
+    },
+    {
+     "id": "V2-7",
+     "verdict": "confirmed",
+     "evidence": "subfleet/scheduler.py:71-95; subfleet/scheduler.py:163; subfleet/default_policy.json:96-109",
+     "correction": ""
+    },
+    {
+     "id": "V2-8",
+     "verdict": "imprecise",
+     "evidence": "subfleet/daemon.py:1964-1970; subfleet/adapters/claude.py:1837-1853; subfleet/protocol.py:62-91; subfleet/gate/verdict.py:29-69; subfleet/gate/service.py:377-380",
+     "correction": "For ordinary jobs the deliverable is free text at deliverable.md (the daemon only checks it is non-empty when rc is 0) and submit accepts no result-schema field. One exception exists: a gate-review round's deliverable must be a sentinel-delimited JSON verdict object, validated field by field against a hand-written schema (schema_version 1, verdict enum, typed findings/notes/summary) in subfleet/gate/verdict.py, invoked on the peer deliverable at subfleet/gate/service.py:377-380. No JSON Schema library is used anywhere in the package."
+    },
+    {
+     "id": "V2-9",
+     "verdict": "confirmed",
+     "evidence": "docs/plan.md:27-29",
+     "correction": ""
+    },
+    {
+     "id": "V2-10",
+     "verdict": "confirmed",
+     "evidence": "subfleet/default_policy.json:2-32; subfleet/default_policy.json:77-80",
+     "correction": ""
+    },
+    {
+     "id": "V2-11",
+     "verdict": "confirmed",
+     "evidence": "subfleet/protocol.py:87; subfleet/daemon.py:567-574; subfleet/daemon.py:591-592; subfleet/store_schema.sql:98",
+     "correction": ""
+    },
+    {
+     "id": "V2-12",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:1190-1207; subfleet/daemon.py:1553-1569; subfleet/adapters/claude.py:1259-1281",
+     "correction": ""
+    },
+    {
+     "id": "V2-13",
+     "verdict": "confirmed",
+     "evidence": "subfleet/sessions/client.py:5-8; subfleet/sessions/registry.py:26-30; subfleet/doctor.py:342-351; subfleet/doctor.py:430-431",
+     "correction": ""
+    },
+    {
+     "id": "V2-14",
+     "verdict": "confirmed",
+     "evidence": "subfleet/cli.py:69; subfleet/cli.py:1978-1997; subfleet/cli.py:1273-1289; subfleet/protocol.py:191-199; subfleet/daemon.py:710-729",
+     "correction": ""
+    }
+   ],
+   "extra_findings": [
+    "WaitReason.APPROVAL (subfleet/contracts.py:40) is in the same state as DEPENDENCY: no code in the package ever writes wait_reason 'approval'. It is only read, at subfleet/daemon.py:1395, where it keeps a job out of admission. A document that lists approval waits as a working v2 mechanism is wrong for the same reason item V2-6 flags dependency waits.",
+    "The per-lane in-flight bound is not a flat 2. subfleet/scheduler.py:207-210 drops the cap to min(max_in_flight_per_lane, max_in_flight_unmeasured, 1), i.e. 1, for any lane with no fresh 'provider' reading inside reading_ttl_s (120 s, subfleet/default_policy.json:98-100). Stating '2 in flight per lane' without that qualifier overstates steady-state fleet concurrency.",
+    "Idempotency (item V2-2) is on the hashed payload, not the whole submission. subfleet/ids.py:54-62 and subfleet/daemon.py:551-556 hash prompt, workdir, workdir_head, task, tier, pinned_model, pinned_lane, sandbox, exclusions, out_path, allow_desktop, policy_hash, isolated_review, review_root and round_lease; kind, max_attempts, max_wall_s, parent_job_id, caller_session and name are excluded. A replay of one request_id that differs only in those fields returns the original job with created=False rather than the 'different payload' error at subfleet/daemon.py:561-562.",
+    "Automatic re-routing (item V2-3) is conditional, and a product document should not describe it as unconditional: a LIMITED outcome does not retry at all when the job has a pinned_lane, a TRANSIENT outcome does not retry when the job is pinned and has already spent a transient on that lane (subfleet/daemon.py:1992-1995), every retry is bounded by max_attempts (default 3, subfleet/default_policy.json:102), and only read-only jobs retry after a lost attempt.",
+    "caps.max_tokens_observed is a policy key that nothing enforces. subfleet/policy.py:180-182 validates it and subfleet/default_policy.json:104 sets it to null, but no module reads it to bound or stop a run; this is the policy-level counterpart of the per-job dead field in item V2-11."
+   ]
+  }
+ },
+ "head_to_head_gates_reader": {
+  "native": {
+   "claims": 40,
+   "readme_contradictions": [
+    "consensus.py module docstring says the gate asks 'a pinned Fable or Sol peer' (consensus.py:5), but sol is retired and remapped to astra at gate creation (consensus.py:1276-1284; PEERS at :36). The README (README.md:843-844) is correct; the docstring is stale.",
+    "README.md:925-926 says 'Each round reserves a unique attempt directory under a lock.' In code the round entry, attempt_id and directory PATH are reserved under the flock (consensus.py:1006-1076), but the directory itself is created after the lock is released (consensus.py:1083 `_private_dir(round_dir)`). Uniqueness comes from the uuid token in the name, not from creating it under the lock.",
+    "README.md:879 says 'each completed review attempt records its dispatch arguments'; the code records peer_argv for every finished round including blocked/failed dispatches (consensus.py:1183-1192; test_consensus.py:135-136) - broader than 'completed', not a conflict.",
+    "README.md:898-901 lists 'missing positive Fable model attestation' as fail-closed; code confirms this applies ONLY to fable peers (consensus.py:1166-1169). README line 880-881 ('The model pin, revision approval, and model attestation checks remain required') could be read as covering astra peers; no attestation check exists for astra in consensus.py."
+   ]
+  },
+  "subfleet": {
+   "claims": 57,
+   "readme_contradictions": [
+    "README:880-881 says 'The model pin, revision approval, and model attestation checks remain required', but `consensus.py:1164-1169` enforces the downgrade marker and served-model attestation only when `state['peer'] == 'fable'`; an astra/Codex peer completes a gate with no served-model attestation.",
+    "README:843-844 says 'A Fable main normally picks an Astra peer, and an Astra main picks a Fable peer'. The code has no complementarity or cross-provider requirement: `_new_gate` only checks membership in {fable, sol, astra} (consensus.py:1274-1275), so a Fable main can gate itself with `--peer fable`, and nothing prevents the peer landing on the same Claude account unless the caller passes `-x`.",
+    "README:913-915 says peers run 'with an immutable artifact copy and source access for PRs' and that project instructions are disabled; the immutability applies to the diff/snapshot only — for PR gates the peer's `--review-root` is the live, mutable checkout at `state['workdir']` (consensus.py:1112), and its freshness is guaranteed by the pre/post `_verify_pr_workspace` re-checks rather than by a copy or a dedicated worktree.",
+    "README:923-925 lists gate state contents as 'prompts, peer outputs, verdicts, main responses...'; the peer's output file does live under the round dir, but the prompt archived there is the pre-delegate text — the peer actually reads a private merged temp prompt with PREAMBLE_AUDIT prepended (delegate.py:1121-1133), which the README does not mention."
+   ]
+  }
+ }
+}

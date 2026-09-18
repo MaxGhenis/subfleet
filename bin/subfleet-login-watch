@@ -1,0 +1,69 @@
+#!/bin/bash
+# Watch a pending `codex login` for home ~/.codex-N; on completion verify the
+# new binding is distinct across all homes (same account in two homes = mutual
+# refresh-token revocation trap) and notify Max via CoS notify either way.
+# Companion to the codex-accounts skill re-login flow (Claude drives, Max clicks).
+# Internal: armed by `subfleet login codex <N>`   (expects state/logs/codex-login-N.log + .pid)
+set -uo pipefail
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+
+N="${1:?usage: subfleet login codex <N>}"
+COS="$HOME/chief-of-staff"
+LOG="$COS/state/logs/codex-login-${N}.log"
+PIDFILE="$COS/state/codex-login-${N}.pid"
+# Lanes are ~/.codex-1..N; ~/.codex is the desktop app's home (not a lane,
+# since 2026-08-19) — log it in with N=app (usage: subfleet login codex app).
+HOME_DIR="$HOME/.codex-${N}"
+[ "$N" = "app" ] && HOME_DIR="$HOME/.codex"
+DEADLINE=$(( $(date +%s) + 86400 ))  # 24h
+
+distinct_report() {
+  # prints duplicated account_ids among LANES (~/.codex-N), else nothing.
+  # ~/.codex (the app) is excluded: the app sharing a lane's account is the
+  # expected "shadow" state, reported separately below, not a lane dup.
+  for h in "$HOME"/.codex-[1-9]; do
+    python3 -c "import json;print(json.load(open('$h/auth.json'))['tokens']['account_id'])" 2>/dev/null
+  done | sort | uniq -d
+}
+
+shadow_report() {
+  # prints the lane(s) whose account the app (~/.codex) is signed into
+  local app
+  app=$(python3 -c "import json;print(json.load(open('$HOME/.codex/auth.json'))['tokens']['account_id'])" 2>/dev/null)
+  [ -n "$app" ] || return 0
+  for h in "$HOME"/.codex-[1-9]; do
+    [ "$(python3 -c "import json;print(json.load(open('$h/auth.json'))['tokens']['account_id'])" 2>/dev/null)" = "$app" ] && basename "$h"
+  done
+}
+
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  if grep -qiE 'success|logged in' "$LOG" 2>/dev/null && [ -f "$HOME_DIR/auth.json" ]; then
+    DUP="$(distinct_report)"
+    if [ -n "$DUP" ]; then
+      "$COS/bin/notify" "⚠️ codex-${N} re-login bound a DUPLICATE account" \
+        "account_id $DUP now lives in two codex homes — that pair will revoke each other's tokens. Redo with a different account: CODEX_HOME=~/.codex-${N} codex login"
+    else
+      SHADOW="$(shadow_report | tr '\n' ' ')"
+      NOTE="All codex lanes hold distinct accounts."
+      [ -n "$SHADOW" ] && NOTE="$NOTE App (~/.codex) is signed into the same account as lane(s): ${SHADOW}— that lane is shadowed (revocation risk; dispatch still follows weekly reset order)."
+      "$COS/bin/notify" "✅ codex-${N} re-login complete" \
+        "$NOTE subfleet refresh kicked; table: subfleet status"
+      launchctl kickstart "gui/$(id -u)/com.maxghenis.cos.subfleet" 2>/dev/null || true
+    fi
+    exit 0
+  fi
+  PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+  if [ -n "$PID" ] && ! ps -p "$PID" >/dev/null 2>&1 && ! grep -qiE 'success|logged in' "$LOG" 2>/dev/null; then
+    "$COS/bin/notify" "codex-${N} login window closed unfinished" \
+      "The waiting login server exited before you completed sign-in. Re-run: CODEX_HOME=~/.codex-${N} codex login (then this watcher: subfleet login codex ${N})"
+    exit 1
+  fi
+  sleep 10
+done
+"$COS/bin/notify" "codex-${N} login still pending after 24h" \
+  "The OAuth tab was never completed. Re-run when ready: CODEX_HOME=~/.codex-${N} codex login"

@@ -1,0 +1,5 @@
+#!/bin/bash
+# carpool was renamed subfleet on 2026-08-23. This launcher stays for one week so
+# in-flight runners and unconverted scripts keep working; it forwards everything.
+echo "carpool: renamed → subfleet (2026-08-23); use: subfleet $*" >&2
+exec "$(dirname "$(readlink -f "$0")")/subfleet" "$@"

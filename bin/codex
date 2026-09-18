@@ -1,0 +1,56 @@
+#!/bin/bash
+# codex PATH shim — reset-order lane selection for agent dispatch (subfleet).
+#
+# Problem (observed week of 2026-08-16): dozens of orchestration lanes call
+# `codex exec` bare, so everything lands on the default ~/.codex home. The
+# dispatcher must select a fleet lane itself and drain weekly windows in reset
+# order.
+#
+# Behavior: for non-interactive subcommands (exec/e/review) with CODEX_HOME
+# unset, pick the best lane via subfleet pick codex (distinct-account + weekly-reset
+# waterfall) and announce it on stderr. Everything
+# else — interactive TUI, login, resume, an explicitly exported CODEX_HOME —
+# passes through untouched. Opt out entirely with SUBFLEET_NO_AUTOPICK=1.
+# Lanes that need a FIXED identity (attestation/provenance) must export
+# CODEX_HOME explicitly; the stderr notice makes any rotation visible in logs.
+set -uo pipefail
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+
+_real_codex() {
+  for c in "$HOME/.bun/bin/codex" "$HOME/.bun/install/global/node_modules/.bin/codex"; do
+    [ -x "$c" ] && { echo "$c"; return; }
+  done
+  command -v -a codex 2>/dev/null | grep -vF "$HOME/bin/codex" | grep -vF "$HOME/dotfiles/bin/codex" | head -1
+}
+
+REAL="$(_real_codex)"
+if [ -z "$REAL" ]; then
+  echo "codex-shim: real codex binary not found" >&2
+  exit 127
+fi
+
+case "${1:-}" in
+  exec|e|review)
+    if [ -z "${CODEX_HOME:-}" ] && [ -z "${SUBFLEET_NO_AUTOPICK:-}" ] && [ -x "$HOME/bin/subfleet" ]; then
+      pick="$("$HOME/bin/subfleet" pick codex)" || pick=""
+      if [ -n "$pick" ] && [ -d "$pick" ]; then
+        export CODEX_HOME="$pick"
+        echo "codex-shim: CODEX_HOME unset -> $pick (reset-order waterfall; export CODEX_HOME or SUBFLEET_NO_AUTOPICK=1 to opt out)" >&2
+        printf '%s\t%s\t%s\n' "$(date -Iseconds)" "$pick" "$PWD" \
+          >> "$HOME/chief-of-staff/state/subfleet/autopick.log" 2>/dev/null || true
+      fi
+    fi
+    # Subscription only (2026-09-04): an explicitly exported CODEX_HOME that is an
+    # OpenAI API-key login is refused (rc 7) unless SUBFLEET_ALLOW_API_LANE=1.
+    if [ "${SUBFLEET_ALLOW_API_LANE:-}" != "1" ] && [ -n "${CODEX_HOME:-}" ] && [ -x "$HOME/bin/subfleet" ]; then
+      "$HOME/bin/subfleet" _api-lane-check "$CODEX_HOME" || exit 7
+    fi
+    ;;
+esac
+
+exec "$REAL" "$@"

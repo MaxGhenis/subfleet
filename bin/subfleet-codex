@@ -1,0 +1,600 @@
+#!/bin/bash
+# subfleet codex (subfleet-codex) — hardened `codex exec` dispatch.
+#
+# Fixes the three ways long codex runs have lost work:
+#   1. Sandbox git failures: workspace-write denies the git common dir of an
+#      external worktree (".git/worktrees/<x>/index.lock: Operation not
+#      permitted"), so agents finish but cannot commit. We add the common dir
+#      to writable_roots.
+#   2. Transient deaths (model at capacity, 401 token rotation, rate limits,
+#      stream disconnects): retried with backoff. Content-filter blocks are
+#      NOT retried — they need a defensive prompt rewrite, so fail fast.
+#   3. Evaporating uncommitted work on kill/crash: an EXIT/INT/TERM trap
+#      snapshots any dirty state (tracked + untracked) to refs/codex-salvage/*
+#      via a temp index + commit-tree. HEAD, the current branch, the real
+#      index, and the worktree are never touched — a kill can no longer
+#      advance a shared checkout's main onto WIP (bit us twice on 2026-07-12).
+#      Resume: the worktree is still dirty, so just keep working; if it got
+#      cleaned, `git cherry-pick -n <sha>` or `git restore --source=<sha> .`
+#      (salvage commits are plain commit-tree objects, not stash entries, and
+#      stashing is denied in shared-worktree lanes anyway).
+#      List snapshots: git for-each-ref refs/codex-salvage
+#      `-b main` / `-b master` is refused (exit 2) up front: the salvage push
+#      force-pushes WIP onto that branch on EVERY exit.
+#   4. Never-rules guard: every launch arms bin/subfleet-guard-hook as a Codex
+#      PreToolUse hook (session-flags `-c hooks=...` override with the trust
+#      hash pinned; the lane's CODEX_HOME is not written to — the preflight
+#      probes a scratch copy of its config). It denies the nine standing NEVER
+#      rules of ~/.claude/hooks/guard-never-rules.sh (unscoped-search,
+#      stash-shared, trust-root, corpus-squash, corpus-push, tg-getupdates,
+#      local-main, keychain-dump, hf-dest) — unscoped-search alone covers the
+#      8/8 (load 47) and 8/18 (load 57) incidents; for codex lanes its broad
+#      roots also include / and /Users. A preflight against the installed
+#      codex (app-server hooks/list) refuses to launch (exit 2, before the
+#      salvage trap is armed) if the hook would be skipped/untrusted;
+#      SUBFLEET_CODEX_GUARD=off disables. See docs/guard.md.
+#
+# Usage:
+#   subfleet codex [-H <codex_home>] [-A] [-T <thread_id>] -m <model> -C <workdir> -p <prompt_file> -o <out_file> \
+#             [-s read-only|workspace-write] [-b <salvage_branch>] [-R <salvage_remote>] \
+#             [-r <max_retries>] [-e <reasoning_effort>] [-d] [-I -D <review_root>]
+#   -A  with -H: start on that lane but re-pick on a usage limit (auto-lane
+#       behaviour with a chosen first lane); without -H it is implied.
+#   -T  resume an existing Codex thread. Requires its original -H home and is
+#       incompatible with -A: Codex thread indexes are home-local and cannot
+#       be migrated to another account lane.
+#   -d  detach: re-exec in a new process session (setsid) and return at once;
+#       progress goes to <out_file base>.lane.log. Survives the launching
+#       shell, a Claude account switch, and the desktop app's idle SIGTERM.
+#   -I  isolated independent review; requires read-only and -D. Disables user
+#       config, project instructions/rules, and persistence for the Codex peer.
+#   -D  explicit source tree the isolated peer may read from its neutral cwd.
+#   -b main|master is refused (exit 2, before anything runs): the salvage push
+#   would force-push WIP onto that branch. Use e.g. -b codex-salvage/<lane>.
+#   env: SUBFLEET_RUN_ID   ledger entry pre-created by `subfleet run` — adopted
+#        (lane/pid/paths filled in) instead of starting a second record.
+#        SUBFLEET_RUN_RESUMED_FROM  source ledger run id for resume provenance.
+#   env: SUBFLEET_CODEX_GUARD=off   disable the never-rules guard for this run
+#        SUBFLEET_CODEX_GUARD_CACHE  preflight cache dir (default ~/.cache/subfleet-codex)
+#        CODEX_GUARD_PREFLIGHT_TIMEOUT  seconds to wait for the preflight
+#                               hooks/list answer (default 60)
+#        SUBFLEET_CODEX_UNIFIED_EXEC=off  add `-c features.unified_exec=false`:
+#                               shell_command only, no exec_command/write_stdin
+#                               PTY sessions. write_stdin emits NO PreToolUse
+#                               payload, so text typed into an interactive
+#                               shell bypasses every guard rule; off closes
+#                               that hole at the cost of PTY sessions in the
+#                               lane. Default on (unchanged lane capability;
+#                               source-verified against codex-rs 0.144.0, not
+#                               yet live-verified).
+#
+# PUBLIC REPOS: the -b salvage push fires on EVERY exit, including success —
+# content reaches the remote BEFORE any review. When origin is public, either
+# omit -b (the salvage ref still protects local work) or pass -R with a
+# private mirror remote; push to origin yourself after review.
+set -u
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+
+ORIG_ARGS=("$@")
+CODEX_HOME_ARG="" MODEL="" WORKDIR="" PROMPT_FILE="" OUT_FILE="" EFFORT=""
+RESUME_THREAD_ID="" RESUMED_FROM=${SUBFLEET_RUN_RESUMED_FROM:-}
+SANDBOX="workspace-write" SALVAGE_BRANCH="" SALVAGE_REMOTE="origin" MAX_RETRIES=2
+AUTO_FLAG=0 DETACH=0 ISOLATED_REVIEW=0 REVIEW_ROOT=""
+while getopts "H:AT:m:C:p:o:s:b:R:r:e:dID:" opt; do
+  case "$opt" in
+    H) CODEX_HOME_ARG=$OPTARG ;;
+    A) AUTO_FLAG=1 ;;
+    T) RESUME_THREAD_ID=$OPTARG ;;
+    m) MODEL=$OPTARG ;;
+    C) WORKDIR=$OPTARG ;;
+    p) PROMPT_FILE=$OPTARG ;;
+    o) OUT_FILE=$OPTARG ;;
+    s) SANDBOX=$OPTARG ;;
+    b) SALVAGE_BRANCH=$OPTARG ;;
+    R) SALVAGE_REMOTE=$OPTARG ;;
+    r) MAX_RETRIES=$OPTARG ;;
+    e) EFFORT=$OPTARG ;;
+    d) DETACH=1 ;;
+    I) ISOLATED_REVIEW=1 ;;
+    D) REVIEW_ROOT=$OPTARG ;;
+    *) exit 2 ;;
+  esac
+done
+for req in MODEL WORKDIR PROMPT_FILE OUT_FILE; do
+  [ -n "${!req}" ] || { echo "subfleet codex: missing -${req:0:1}" >&2; exit 2; }
+done
+[ -f "$PROMPT_FILE" ] || { echo "subfleet codex: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+if [ "$ISOLATED_REVIEW" = 1 ]; then
+  [ "$SANDBOX" = "read-only" ] || { echo "subfleet codex: -I requires -s read-only" >&2; exit 2; }
+  [ -n "$REVIEW_ROOT" ] && [ -d "$REVIEW_ROOT" ] \
+    || { echo "subfleet codex: -I requires -D <review_root>" >&2; exit 2; }
+  [ -z "$SALVAGE_BRANCH" ] \
+    || { echo "subfleet codex: -I cannot be combined with -b" >&2; exit 2; }
+  [ -z "$RESUME_THREAD_ID" ] \
+    || { echo "subfleet codex: -I cannot resume an existing thread (-T)" >&2; exit 2; }
+  WORKDIR=$(cd -P "$WORKDIR" >/dev/null 2>&1 && pwd) \
+    || { echo "subfleet codex: cannot resolve isolated review workdir" >&2; exit 2; }
+  REVIEW_ROOT=$(cd -P "$REVIEW_ROOT" >/dev/null 2>&1 && pwd) \
+    || { echo "subfleet codex: cannot resolve isolated review root" >&2; exit 2; }
+elif [ -n "$REVIEW_ROOT" ]; then
+  echo "subfleet codex: -D requires -I" >&2
+  exit 2
+fi
+if [ -n "$RESUME_THREAD_ID" ]; then
+  [ -n "$CODEX_HOME_ARG" ] || {
+    echo "subfleet codex: -T requires the thread's original -H CODEX_HOME" >&2
+    exit 2
+  }
+  [ "$AUTO_FLAG" = 0 ] || {
+    echo "subfleet codex: -T cannot be combined with -A; Codex threads cannot migrate homes" >&2
+    exit 2
+  }
+fi
+# Refuse a salvage branch named main/master before ANYTHING runs (no guard, no
+# preflight, no salvage trap): the salvage push is `git push -qf <remote>
+# <sha>:refs/heads/<branch>` on every exit — one typo away from force-pushing
+# WIP onto main, the exact harm corpus-push exists to prevent.
+case "$SALVAGE_BRANCH" in
+  main|master)
+    echo "subfleet codex: refusing -b main|master — the salvage push force-pushes WIP onto that branch; use a salvage branch name (e.g. -b codex-salvage/<lane>)" >&2
+    exit 2 ;;
+esac
+ERR_FILE="${OUT_FILE%.md}.err.log"
+ORIGINAL_OUT_FILE=${SUBFLEET_RUN_ORIGINAL_OUT-$OUT_FILE}
+SELF=$(readlink -f "$0")
+
+# -d: re-exec this script in a NEW process session. Plain `nohup … &` stays in
+# the launching shell's process group, which the desktop app SIGTERMs on
+# pause/idle and which dies with a Claude account switch; setsid() makes the
+# runner immune to both (macOS ships no setsid binary, python does it).
+if [ "$DETACH" = 1 ] && [ "${SUBFLEET_CODEX_DETACHED:-}" != 1 ]; then
+  LANE_LOG=${SUBFLEET_RUN_LANE_LOG:-${OUT_FILE%.md}.lane.log}
+  command -v python3 >/dev/null || { echo "subfleet codex: -d needs python3 for setsid" >&2; exit 2; }
+  SUBFLEET_CODEX_DETACHED=1 SUBFLEET_RUN_LANE_LOG="$LANE_LOG" \
+    python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$SELF" "${ORIG_ARGS[@]}" </dev/null >>"$LANE_LOG" 2>&1 &
+  pid=$!
+  disown "$pid" 2>/dev/null || true
+  echo "subfleet codex: detached pid=$pid · log=$LANE_LOG · out=$OUT_FILE"
+  exit 0
+fi
+
+# Lane assignment is the machinery's job: with no -H, take the best lane from
+# `subfleet pick codex` (distinct-account + weekly-reset waterfall) and
+# say so on stderr. Pass -H only to PIN a lane (attestation/provenance,
+# quota forensics) — orchestrators should not hand-pick lane numbers.
+AUTO_LANE=0
+HERE0=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+SUBFLEET=${SUBFLEET_RUN_SUBFLEET:-$HERE0/subfleet}
+
+# Start the durable record before lane selection and guard preflight. Those are
+# part of a dispatch too, and their failures must leave a finalized run rather
+# than disappearing before the provider process is reached.
+RUN_ID=""
+record_run_start() {
+  local record_args
+  if [ -n "${SUBFLEET_RUN_ID:-}" ]; then
+    # `subfleet run` pre-created the entry (so the caller knows the id before
+    # we exist); fill in what only the runner knows. A finished or unknown id
+    # is refused by the ledger, in which case we start our own record.
+    record_args=(
+      _record-run --phase adopt --run-id "$SUBFLEET_RUN_ID" --pid $$
+      --out "$OUT_FILE" --err "$ERR_FILE"
+    )
+    [ -z "$CODEX_HOME_ARG" ] || record_args+=(--lane "$CODEX_HOME_ARG")
+    [ -z "${SUBFLEET_RUN_LANE_LOG:-}" ] || record_args+=(--lane-log "$SUBFLEET_RUN_LANE_LOG")
+    [ -z "$RESUMED_FROM" ] || record_args+=(--resumed-from "$RESUMED_FROM")
+    RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+    [ -z "$RUN_ID" ] || return 0
+  fi
+  record_args=(
+    _record-run --phase start --family codex --model "$MODEL"
+    --lane "$CODEX_HOME_ARG" --workdir "$WORKDIR" --prompt "$PROMPT_FILE"
+    --out "$OUT_FILE" --err "$ERR_FILE" --original-out "$ORIGINAL_OUT_FILE"
+    --pid $$ --launcher "subfleet codex"
+  )
+  [ -z "${SUBFLEET_RUN_LANE_LOG:-}" ] \
+    || record_args+=(--lane-log "$SUBFLEET_RUN_LANE_LOG")
+  [ -z "$RESUMED_FROM" ] || record_args+=(--resumed-from "$RESUMED_FROM")
+  RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+}
+
+record_run_lane() {
+  [ -n "$RUN_ID" ] || return 0
+  "$SUBFLEET" _record-run --phase update --run-id "$RUN_ID" \
+    --lane "$CODEX_HOME_ARG" >/dev/null 2>&1 || true
+}
+
+record_run_finish() {
+  local final_rc=$1
+  local record_args
+  [ -n "$RUN_ID" ] || return 0
+  record_args=(
+    _record-run --phase finish --run-id "$RUN_ID" --rc "$final_rc"
+  )
+  [ -z "$CODEX_HOME_ARG" ] || record_args+=(--lane "$CODEX_HOME_ARG")
+  "$SUBFLEET" "${record_args[@]}" >/dev/null 2>&1 || true
+}
+
+cleanup_owned_prompt() {
+  local owned_prompt=${SUBFLEET_RUN_OWNED_PROMPT:-}
+  [ -n "$owned_prompt" ] || return 0
+  if [ "$owned_prompt" != "$PROMPT_FILE" ]; then
+    echo "subfleet codex: WARNING refusing mismatched owned prompt $owned_prompt" >&2
+    return 1
+  fi
+  case "$(basename "$owned_prompt")" in
+    delegate-prompt-*.md)
+      if ! rm -f "$owned_prompt" || [ -e "$owned_prompt" ]; then
+        echo "subfleet codex: WARNING could not remove owned prompt $owned_prompt" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "subfleet codex: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
+      return 1
+      ;;
+  esac
+}
+
+early_on_exit() {
+  local final_rc=$?
+  trap - EXIT
+  cleanup_owned_prompt || true
+  record_run_finish "$final_rc"
+  exit "$final_rc"
+}
+
+trap early_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+record_run_start
+# Nested dispatches from inside the lane must not inherit this run's identity.
+unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG \
+      SUBFLEET_RUN_ID SUBFLEET_RUN_CALLER_JSON SUBFLEET_RUN_RESUMED_FROM \
+      SUBFLEET_CODEX_DETACHED
+
+CODEX_PICK_BIN=${SUBFLEET_CODEX_PICK:-}
+[ -n "$CODEX_PICK_BIN" ] || CODEX_PICK_BIN="$HERE0/subfleet pick codex"
+if [ -z "$CODEX_HOME_ARG" ]; then
+  CODEX_HOME_ARG=$($CODEX_PICK_BIN) || { echo "subfleet codex: no dispatchable lane (pick rc=$?)" >&2; exit 1; }
+  [ -n "$CODEX_HOME_ARG" ] || { echo "subfleet codex: pick returned nothing" >&2; exit 1; }
+  AUTO_LANE=1
+  echo "subfleet codex: lane auto-assigned → ${CODEX_HOME_ARG/#$HOME/~}" >&2
+elif [ "$AUTO_FLAG" = 1 ]; then
+  AUTO_LANE=1
+  echo "subfleet codex: starting on ${CODEX_HOME_ARG/#$HOME/~}; will re-pick on a usage limit (-A)" >&2
+fi
+record_run_lane
+
+# Subscription only: lanes never run on the metered OpenAI API (Max 2026-09-04:
+# "dont use the api! its super expensive i need to use my sub"). An exported
+# CODEX_API_KEY overrides a ChatGPT auth.json (verified on codex 0.153.3: a
+# bogus key produced a 401 from api.openai.com), so it is dropped; an exported
+# OPENAI_API_KEY does not (the same probe answered on the subscription) and is
+# left alone for task scripts. A home whose auth.json is an API-key login is
+# refused with rc 7 before any codex call; SUBFLEET_ALLOW_API_LANE=1 is the
+# deliberate override.
+# The check is self-contained (python3, mirrors subfleet.codex.api_key_login)
+# so it holds even where the subfleet wrapper is absent.
+api_key_login_home() {
+  [ -f "$1/auth.json" ] || return 1
+  python3 - "$1/auth.json" <<'PY'
+import json, sys
+try:
+    raw = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if not isinstance(raw, dict):
+    sys.exit(1)
+if any(raw.get(k) for k in ("OPENAI_API_KEY", "CODEX_API_KEY")):
+    sys.exit(0)
+mode = str(raw.get("auth_mode") or "").lower().replace("_", "").replace("-", "")
+sys.exit(0 if mode == "apikey" else 1)
+PY
+}
+if [ "${SUBFLEET_ALLOW_API_LANE:-}" != "1" ]; then
+  unset CODEX_API_KEY
+  if api_key_login_home "$CODEX_HOME_ARG"; then
+    echo "subfleet codex: ${CODEX_HOME_ARG/#$HOME/~} is an OpenAI API-key login (metered platform billing); lanes run on ChatGPT subscriptions only (SUBFLEET_ALLOW_API_LANE=1 overrides deliberately)" >&2
+    exit 7
+  fi
+fi
+
+# Sandbox-safe git: expose the worktree's git common dir when writing.
+EXTRA_CFG=()
+[ -n "$EFFORT" ] && EXTRA_CFG+=(-c "model_reasoning_effort=\"$EFFORT\"")
+if [ "$SANDBOX" = "workspace-write" ]; then
+  COMMON_DIR=$(git -C "$WORKDIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  [ -n "$COMMON_DIR" ] && EXTRA_CFG+=(-c "sandbox_workspace_write.writable_roots=[\"$COMMON_DIR\"]")
+fi
+
+# Opt-in: close the write_stdin guard bypass (see the env docs above).
+if [ "${SUBFLEET_CODEX_UNIFIED_EXEC:-on}" = "off" ]; then
+  EXTRA_CFG+=(-c "features.unified_exec=false")
+  echo "subfleet codex: unified_exec disabled (shell_command only; write_stdin bypass closed)" >&2
+fi
+ISOLATED_ARGS=()
+prepare_isolated_review() {
+  # Run again before every attempt: auto-lane rotation can select a different
+  # config, and inventories from the previous account must not be reused.
+  CODEX_HOME_ARG=$(cd -P "$CODEX_HOME_ARG" >/dev/null 2>&1 && pwd) \
+    || { echo "subfleet codex: cannot resolve isolated review home" >&2; return 2; }
+  record_run_lane
+  local MCP_DISABLE_CFG mcp_override
+  local -a ISOLATED_CFG
+  # Filesystem read-only does not govern hosted tools, connector traffic, or
+  # lifecycle hooks. Turn those capabilities off only for independent peers.
+  ISOLATED_CFG=(
+    -c project_doc_max_bytes=0
+    -c features.apps=false
+    -c features.plugins=false
+    -c features.remote_plugin=false
+    -c features.hooks=false
+    -c features.multi_agent=false
+    -c features.multi_agent_v2=false
+    -c features.tool_suggest=false
+    -c features.skill_mcp_dependency_install=false
+    -c features.computer_use=false
+    -c features.browser_use=false
+    -c features.browser_use_external=false
+    -c features.browser_use_full_cdp_access=false
+    -c features.in_app_browser=false
+    -c features.image_generation=false
+    -c features.goals=false
+    -c features.memories=false
+    -c features.shell_snapshot=false
+    -c shell_environment_policy.experimental_use_profile=false
+    -c 'history.persistence="none"'
+    -c 'web_search="disabled"'
+  )
+  ISOLATED_ARGS=(
+    --ephemeral --ignore-user-config --ignore-rules
+    "${ISOLATED_CFG[@]}"
+  )
+  # Read-only already permits reading the source path in the review prompt.
+  # Do not use --add-dir: that option declares additional writable roots.
+  # An empty mcp_servers table deep-merges and does NOT erase lower layers.
+  # Inspect requirements/layers without creating a thread: managed policies can
+  # override CLI sandbox and feature flags. V1 refuses managed configuration.
+  # Then inventory MCP config without starting servers and disable every named
+  # transport. Harmless stubs keep user-only entries valid when exec ignores
+  # user config. Never log config: it can contain credential values.
+  MCP_DISABLE_CFG=$(CODEX_HOME="$CODEX_HOME_ARG" python3 - "$WORKDIR" "${ISOLATED_CFG[@]}" <<'PY'
+import json
+import os
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+
+def require_unmanaged_config():
+    proc = subprocess.Popen(
+        ["codex", "app-server", *sys.argv[2:]], cwd=sys.argv[1],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        messages = [
+            {"id": 1, "method": "initialize", "params": {
+                "clientInfo": {"name": "subfleet-isolation", "version": "1"},
+            }},
+            {"method": "initialized", "params": {}},
+            {"id": 2, "method": "configRequirements/read", "params": {}},
+            {"id": 3, "method": "config/read", "params": {"includeLayers": True}},
+        ]
+        proc.stdin.write("".join(json.dumps(msg) + "\n" for msg in messages).encode())
+        proc.stdin.flush()
+        responses, pending = {}, b""
+        deadline = time.monotonic() + 20
+        while set(responses) != {2, 3}:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise ValueError("config inspection timed out")
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                raise ValueError("config inspection ended without a response")
+            pending += chunk
+            if len(pending) > 8_000_000:
+                raise ValueError("config inspection exceeded size limit")
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                response = json.loads(line)
+                if response.get("id") in (2, 3):
+                    responses[response["id"]] = response["result"]
+        if responses[2]["requirements"] is not None:
+            raise ValueError("managed requirements are unsupported")
+        layers = responses[3]["layers"]
+        if not isinstance(layers, list) or not layers:
+            raise ValueError("missing config layers")
+        for layer in layers:
+            source = layer["name"]["type"]
+            config = layer["config"]
+            if not isinstance(config, dict):
+                raise ValueError("invalid config layer")
+            if source in ("sessionFlags", "user"):
+                continue  # Our flags, or the user config exec explicitly ignores.
+            if source in ("system", "project") and not config:
+                continue
+            raise ValueError("managed or project config is unsupported")
+    finally:
+        selector.close()
+        proc.stdin.close()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=1)
+        proc.stdout.close()
+
+try:
+    require_unmanaged_config()
+    result = subprocess.run(
+        ["codex", "mcp", "list", "--json", *sys.argv[2:]],
+        cwd=sys.argv[1], capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode:
+        raise ValueError("MCP inventory failed")
+    servers = json.loads(result.stdout)
+    if not isinstance(servers, list):
+        raise ValueError("invalid MCP inventory")
+    seen = set()
+    for server in servers:
+        name = server["name"]
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name) or name in seen:
+            raise ValueError("invalid MCP server name")
+        seen.add(name)
+        kind = server["transport"]["type"]
+        if kind == "stdio":
+            print(f'mcp_servers.{name}.command="false"')
+        elif kind == "streamable_http":
+            print(f'mcp_servers.{name}.url="https://invalid.invalid"')
+        else:
+            raise ValueError("unknown MCP transport")
+        print(f"mcp_servers.{name}.enabled=false")
+except Exception:
+    sys.exit(1)
+PY
+) || { echo "subfleet codex: cannot safely isolate review configuration/MCP servers (managed settings are unsupported); refusing to launch" >&2; return 2; }
+  while IFS= read -r mcp_override; do
+    [ -z "$mcp_override" ] || ISOLATED_ARGS+=(-c "$mcp_override")
+  done <<< "$MCP_DISABLE_CFG"
+}
+
+# never-rules guard (see docs/guard.md). Off: SUBFLEET_CODEX_GUARD=off
+# Runs before the salvage trap is armed: a refused launch must not snapshot or
+# push anything.
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+GUARD_ON=0
+if [ "$ISOLATED_REVIEW" = 1 ]; then
+  echo "subfleet codex: independent review — user/project hooks and guard preflight disabled" >&2
+elif [ "${SUBFLEET_CODEX_GUARD:-on}" = "off" ]; then
+  echo "subfleet codex: never-rules guard DISABLED (SUBFLEET_CODEX_GUARD=off)" >&2
+else
+  GUARD_ON=1
+  GUARD_OVERRIDE=$("$HERE/subfleet-guard" override) || { echo "subfleet codex: guard override generation failed; refusing to launch (SUBFLEET_CODEX_GUARD=off to bypass)" >&2; exit 2; }
+  "$HERE/subfleet-guard" preflight -H "$CODEX_HOME_ARG" -C "$WORKDIR" >&2 || { echo "subfleet codex: guard preflight FAILED (see preflight output above); refusing to launch (SUBFLEET_CODEX_GUARD=off to bypass)" >&2; exit 2; }
+  EXTRA_CFG+=(-c "$GUARD_OVERRIDE")
+  echo "subfleet codex: never-rules guard armed (9 rules; hook=$HERE/subfleet-guard-hook)" >&2
+fi
+
+salvage() {
+  git -C "$WORKDIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local salvage_sha=""
+  if [ -n "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
+    local gitdir tmpidx tree parent branch ts ref
+    gitdir=$(git -C "$WORKDIR" rev-parse --absolute-git-dir 2>/dev/null)
+    parent=$(git -C "$WORKDIR" rev-parse --verify HEAD 2>/dev/null)
+    if [ -n "$gitdir" ] && [ -n "$parent" ]; then
+      tmpidx="$gitdir/codex-salvage-index.$$"
+      # Snapshot into a temp index: never touches HEAD, branch, real index, or worktree.
+      if GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" read-tree "$parent" 2>/dev/null \
+         && GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" add -A 2>/dev/null; then
+        tree=$(GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" write-tree 2>/dev/null)
+        if [ -n "$tree" ]; then
+          salvage_sha=$(git -C "$WORKDIR" commit-tree "$tree" -p "$parent" \
+            -m "WIP salvage: subfleet codex auto-commit (model=$MODEL)" 2>/dev/null)
+        fi
+      fi
+      rm -f "$tmpidx"
+      if [ -n "$salvage_sha" ]; then
+        branch=$(git -C "$WORKDIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+        ts=$(date +%Y%m%d-%H%M%S)
+        ref="refs/codex-salvage/${branch//\//-}-$ts-$$"
+        git -C "$WORKDIR" update-ref "$ref" "$salvage_sha" 2>/dev/null \
+          && echo "subfleet codex: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
+      else
+        echo "subfleet codex: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
+      fi
+    fi
+  fi
+  if [ -n "$SALVAGE_BRANCH" ]; then
+    local push_src="${salvage_sha:-HEAD}"
+    git -C "$WORKDIR" push -qf "$SALVAGE_REMOTE" "$push_src:refs/heads/$SALVAGE_BRANCH" 2>/dev/null \
+      && echo "subfleet codex: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
+  fi
+}
+
+on_exit() {
+  local final_rc=$?
+  trap - EXIT
+  if ! cleanup_owned_prompt; then
+    echo "subfleet codex: WARNING skipping salvage and push to protect the private prompt" >&2
+  elif [ "$ISOLATED_REVIEW" != 1 ]; then
+    salvage
+  fi
+  record_run_finish "$final_rc"
+  exit "$final_rc"
+}
+
+trap on_exit EXIT
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  if [ "$ISOLATED_REVIEW" = 1 ]; then
+    prepare_isolated_review || exit 2
+  fi
+  : > "$OUT_FILE"
+  if [ -n "$RESUME_THREAD_ID" ]; then
+    CODEX_HOME="$CODEX_HOME_ARG" codex exec --skip-git-repo-check --color never \
+      ${ISOLATED_ARGS[@]+"${ISOLATED_ARGS[@]}"} \
+      --sandbox "$SANDBOX" ${EXTRA_CFG[@]+"${EXTRA_CFG[@]}"} -m "$MODEL" -C "$WORKDIR" -o "$OUT_FILE" \
+      resume "$RESUME_THREAD_ID" "$(cat "$PROMPT_FILE")" </dev/null >/dev/null 2>"$ERR_FILE"
+  else
+    CODEX_HOME="$CODEX_HOME_ARG" codex exec --skip-git-repo-check --color never \
+      ${ISOLATED_ARGS[@]+"${ISOLATED_ARGS[@]}"} \
+      --sandbox "$SANDBOX" ${EXTRA_CFG[@]+"${EXTRA_CFG[@]}"} -m "$MODEL" -C "$WORKDIR" -o "$OUT_FILE" \
+      "$(cat "$PROMPT_FILE")" </dev/null >/dev/null 2>"$ERR_FILE"
+  fi
+  rc=$?
+  [ $rc -eq 0 ] && [ -s "$OUT_FILE" ] && { echo "subfleet codex: OK attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')"; exit 0; }
+
+  if grep -qiE "content filter|trusted access|can('|’)t (help|assist) with" "$ERR_FILE"; then
+    echo "subfleet codex: CONTENT-FILTERED — rewrite the prompt defensively (audit/verify framing, not construct/exploit). Not retrying." >&2
+    exit 3
+  fi
+  if grep -qiE "hit your usage limit|usage limit reached" "$ERR_FILE"; then
+    OLD_HOME=$CODEX_HOME_ARG
+    "$SUBFLEET" _record-codex-cooldown --home "$OLD_HOME" --minutes 15 >/dev/null 2>&1 || true
+    if [ "$AUTO_LANE" = 1 ] && [ $attempt -le $MAX_RETRIES ]; then
+      NEW_HOME=$($CODEX_PICK_BIN) || NEW_HOME=""
+      if [ -n "$NEW_HOME" ] && [ "$NEW_HOME" != "$OLD_HOME" ]; then
+        if [ "$GUARD_ON" = 1 ] && ! "$HERE/subfleet-guard" preflight -H "$NEW_HOME" -C "$WORKDIR" >&2; then
+          echo "subfleet codex: guard preflight refused re-picked lane ${NEW_HOME/#$HOME/~}; stopping" >&2
+        else
+          CODEX_HOME_ARG=$NEW_HOME
+          record_run_lane
+          echo "subfleet codex: lane ${OLD_HOME/#$HOME/~} hit its usage limit; re-picked → ${NEW_HOME/#$HOME/~} (attempt $attempt/$MAX_RETRIES)" >&2
+          continue
+        fi
+      else
+        echo "subfleet codex: usage limit on ${OLD_HOME/#$HOME/~} and no alternate lane available" >&2
+      fi
+    fi
+  fi
+  if [ $attempt -le $MAX_RETRIES ] && grep -qiE "capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out|temporarily" "$ERR_FILE"; then
+    wait_s=$((60 * attempt))
+    echo "subfleet codex: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'capacity|401|unauthorized|rate limit|too many requests|disconnect|overloaded|timed? ?out' "$ERR_FILE")" >&2
+    sleep "$wait_s"
+    continue
+  fi
+  echo "subfleet codex: FAILED rc=$rc attempt=$attempt (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
+  tail -3 "$ERR_FILE" >&2
+  [ "$rc" -eq 0 ] && rc=1  # rc=0 with an empty out file is still a failure — don't report success
+  exit "$rc"
+done

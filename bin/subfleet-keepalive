@@ -1,0 +1,7 @@
+#!/bin/bash
+# launchd entrypoint: keep idle Claude five-hour windows rolling.
+set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/bin:$HOME/.local/bin"
+ROOT="$HOME/chief-of-staff/subfleet"
+echo "$(date -Iseconds) subfleet keepalive starting"
+cd "$ROOT" && exec "$ROOT/bin/subfleet" keepalive

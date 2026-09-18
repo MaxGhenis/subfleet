@@ -1,0 +1,341 @@
+#!/bin/bash
+# subfleet-guard — helper CLI for the subfleet codex never-rules guard.
+#
+# subfleet codex arms bin/subfleet-guard-hook (the nine standing NEVER rules of
+# ~/.claude/hooks/guard-never-rules.sh) as a Codex PreToolUse hook on every
+# launch through the session-flags config layer (`codex exec -c hooks=...`),
+# with the hook's trust hash pinned in the same override. The lane's
+# CODEX_HOME is never written to: the preflight probes a scratch home seeded
+# with a copy of the lane's config.toml/hooks.json. This script generates that
+# override, computes the trust hash exactly the way Codex 0.144.0 does,
+# dry-runs the hook, and preflights the override against the installed codex
+# (app-server `hooks/list`) so a codex upgrade that changes the hash scheme
+# refuses to launch instead of silently skipping the hook.
+# The hook matcher is "Bash|apply_patch": a matcher made only of
+# [A-Za-z0-9_|] is an EXACT Codex matcher with `|` alternatives
+# (hooks/src/events/common.rs), so it fires for the shell tools
+# (tool_name Bash) and the freeform apply_patch edit tool (whose matcher
+# aliases include Write and Edit — core/src/tools/hook_names.rs).
+# Details: docs/guard.md.
+#
+# Usage:
+#   subfleet-guard override  [--hook <abs path>] [--timeout <sec>] [--matcher <m>] [--status <s>]
+#       print the value for `codex exec -c <value>` (starts with `hooks={`)
+#   subfleet-guard hash      [--hook <abs path>] [--timeout <sec>] [--matcher <m>] [--status <s>]
+#       print the trust hash (sha256:<hex>) Codex computes for that hook entry
+#   subfleet-guard key
+#       print the hook-state key of a session-flags PreToolUse hook (group 0,
+#       handler 0): /<session-flags>/config.toml:pre_tool_use:0:0
+#   subfleet-guard check [--hook <abs path>] [--tool Bash|apply_patch] '<command|patch>'|- [cwd]
+#       dry-run the hook with a synthesized Codex payload; prints
+#       `deny: <reason>` (exit 1) or `allow` (exit 0). Does not log.
+#       --hook dry-runs a candidate copy instead of the armed hook.
+#       --tool apply_patch feeds the text as a freeform patch payload
+#       (dry-runs the hf-dest adapter); default Bash. `-` reads the
+#       command/patch text from stdin (e.g. `check --tool apply_patch - <cwd>
+#       < change.patch`).
+#   subfleet-guard preflight -H <codex_home> -C <workdir> [--no-cache]
+#       verify against the installed codex that the override yields the hook
+#       enabled + trusted. Probes a scratch CODEX_HOME seeded with a copy of
+#       the lane's config.toml and hooks.json (never the lane home itself),
+#       with `-c features.plugins=false` so app-server does not start its
+#       plugin-marketplace sync. Result cached per (codex version, home,
+#       override, seeded-config fingerprint) under
+#       ${SUBFLEET_CODEX_GUARD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/subfleet-codex};
+#       markers older than 30 days are pruned whenever a new one is written.
+#       --no-cache bypasses the cache both ways: no cached ok is read and no
+#       marker is written (manual checks against a temp home leave nothing).
+#       env: CODEX_GUARD_PREFLIGHT_TIMEOUT  seconds to wait for hooks/list
+#            (default 60); the app-server is killed at the deadline.
+#
+# --hook defaults to subfleet-guard-hook next to this script; --timeout defaults
+# to 60 (a hook timeout is fail-open in Codex, and the guard matters most
+# under exactly the process-spawn stalls that would trip a short one; test-only
+# knob: the pinned-hash test reproduces the value verified against a live codex
+# with --timeout 30). --matcher defaults to "Bash|apply_patch" and --status to
+# "never-rules guard" (test/pin knobs like --timeout: the trust hash covers
+# both, so the old-identity pin is reproduced with --matcher Bash --status
+# "unscoped-search guard"). Exit 2 on usage errors.
+# Codex runs a command hook through a shell — the session's local shell with
+# `-c` (core/src/session/mod.rs build_hooks_for_config -> core/src/shell.rs
+# derive_exec_args, use_login_shell=false), or `$SHELL -lc` when no local
+# environment shell is known (hooks/src/engine/command_runner.rs
+# default_shell_command) — so the command string is shell-interpreted: the
+# hook path is single-quoted when it contains anything outside
+# [[:alnum:]@%+=:,./_-] (identical string in the override and in the hash).
+# The default path needs no quoting.
+# bash 3.2 compatible (macOS /bin/bash).
+set -u
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+export LC_ALL=C
+
+SELF=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+HOOK="$HERE/subfleet-guard-hook"
+TIMEOUT=60
+STATUS_MSG="never-rules guard"
+MATCHER="Bash|apply_patch"
+KEY='/<session-flags>/config.toml:pre_tool_use:0:0'
+# User-layer hook sources codex reads from CODEX_HOME (hooks.json and the
+# [hooks]/[features] tables of config.toml); copied into the scratch probe home.
+SEED_FILES="config.toml hooks.json"
+CODEX_HOME_ARG="" WORKDIR="" NO_CACHE=""
+
+usage() {
+  sed -n '/^# Usage:/,/^# bash 3.2/p' "$SELF" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+need_jq() {
+  command -v jq >/dev/null 2>&1 && return 0
+  for j in /opt/homebrew/bin/jq /usr/bin/jq; do
+    [ -x "$j" ] && { PATH="$(dirname "$j"):$PATH"; export PATH; return 0; }
+  done
+  echo "subfleet-guard: jq not found" >&2
+  exit 1
+}
+
+# TOML basic-string escaping for the hook path (\ and ").
+toml_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# POSIX single-quote shell quoting, applied only when needed (see header).
+shell_quote() {
+  case "$1" in
+    *[![:alnum:]@%+=:,./_-]*|'') printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+hook_cmd() { shell_quote "$HOOK"; }
+
+# Trust hash = "sha256:" + hex(sha256(compact JSON, keys sorted recursively))
+# over the normalized handler identity (codex-rs/config/src/fingerprint.rs
+# version_for_toml over hooks::discovery::NormalizedHookIdentity).
+# jq -S sorts keys recursively, -c is compact; no trailing newline is hashed.
+compute_hash() {
+  local json
+  json=$(jq -cnS --arg cmd "$(hook_cmd)" --argjson t "$TIMEOUT" --arg m "$MATCHER" --arg s "$STATUS_MSG" \
+    '{event_name:"pre_tool_use",matcher:$m,hooks:[{type:"command",command:$cmd,timeout:$t,async:false,statusMessage:$s}]}') || return 1
+  printf 'sha256:%s' "$(printf '%s' "$json" | shasum -a 256 | cut -d' ' -f1)"
+}
+
+build_override() {
+  local hash esc
+  hash=$(compute_hash) || return 1
+  esc=$(toml_escape "$(hook_cmd)")
+  printf 'hooks={PreToolUse=[{matcher="%s",hooks=[{type="command",command="%s",timeout=%s,statusMessage="%s"}]}],state={"%s"={trusted_hash="%s",enabled=true}}}' \
+    "$MATCHER" "$esc" "$TIMEOUT" "$STATUS_MSG" "$KEY" "$hash"
+}
+
+parse_common() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hook) [ $# -ge 2 ] || usage; HOOK=$2; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || usage; TIMEOUT=$2; shift 2 ;;
+      --matcher) [ $# -ge 2 ] || usage; MATCHER=$2; shift 2 ;;
+      --status) [ $# -ge 2 ] || usage; STATUS_MSG=$2; shift 2 ;;
+      -H) [ $# -ge 2 ] || usage; CODEX_HOME_ARG=$2; shift 2 ;;
+      -C) [ $# -ge 2 ] || usage; WORKDIR=$2; shift 2 ;;
+      --no-cache) NO_CACHE=1; shift ;;
+      *) usage ;;
+    esac
+  done
+  case "$TIMEOUT" in ''|*[!0-9]*) echo "subfleet-guard: --timeout must be an integer" >&2; exit 2 ;; esac
+  case "$HOOK" in /*) ;; *) echo "subfleet-guard: --hook must be an absolute path" >&2; exit 2 ;; esac
+  [ -n "$MATCHER" ] || { echo "subfleet-guard: --matcher must be non-empty" >&2; exit 2; }
+}
+
+cmd_check() {
+  # check [--hook <abs path>] [--tool Bash|apply_patch] '<command|patch>'|- [cwd]
+  local tool_name="Bash"
+  while :; do
+    case "${1:-}" in
+      --hook)
+        [ $# -ge 2 ] || usage
+        HOOK=$2; shift 2
+        case "$HOOK" in /*) ;; *) echo "subfleet-guard: --hook must be an absolute path" >&2; exit 2 ;; esac ;;
+      --tool)
+        [ $# -ge 2 ] || usage
+        tool_name=$2; shift 2
+        case "$tool_name" in Bash|apply_patch) ;; *) echo "subfleet-guard: --tool must be Bash or apply_patch" >&2; exit 2 ;; esac ;;
+      *) break ;;
+    esac
+  done
+  [ $# -ge 1 ] && [ $# -le 2 ] || usage
+  need_jq
+  local command=$1 cwd=${2:-$PWD} payload out decision reason
+  [ "$command" = "-" ] && command=$(cat)
+  [ -x "$HOOK" ] || { echo "subfleet-guard: hook not executable: $HOOK" >&2; exit 1; }
+  payload=$(jq -cn --arg cwd "$cwd" --arg cmd "$command" --arg tool "$tool_name" \
+    '{session_id:"subfleet-guard-check",turn_id:"subfleet-guard-check",tool_use_id:"subfleet-guard-check",hook_event_name:"PreToolUse",permission_mode:"never",model:"subfleet-guard-check",transcript_path:null,tool_name:$tool,cwd:$cwd,tool_input:{command:$cmd}}')
+  # Dry run: never write to the real denial log unless the caller asked for one.
+  out=$(printf '%s' "$payload" | CODEX_GUARD_LOG="${CODEX_GUARD_LOG:-/dev/null}" "$HOOK")
+  if [ -z "$out" ]; then echo "allow"; exit 0; fi
+  decision=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // .decision // empty' 2>/dev/null)
+  reason=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // .reason // empty' 2>/dev/null)
+  case "$decision" in
+    deny|block) echo "deny: $reason"; exit 1 ;;
+    *) echo "allow"; exit 0 ;;
+  esac
+}
+
+# sha256 over the seed files (name + content) present in a lane home; part of
+# the preflight cache key so a lane config edit (e.g. `features.hooks=false`)
+# re-verifies instead of riding a stale marker.
+seed_fingerprint() {
+  local f
+  { for f in $SEED_FILES; do
+      if [ -f "$1/$f" ]; then printf '%s\n' "$f"; cat "$1/$f"; printf '\n'; fi
+    done; } 2>/dev/null | shasum -a 256 | cut -d' ' -f1
+}
+
+pid_alive() {  # $1 = pid file
+  local p
+  p=$(cat "$1" 2>/dev/null)
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+}
+
+# TERM then KILL a pid and its direct children (the npm `codex` launcher is a
+# node process that forwards TERM to the native binary; a KILL would orphan it).
+kill_tree() {
+  local pid=$1 kids=""
+  command -v pgrep >/dev/null 2>&1 && kids=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')
+  kill -TERM $pid $kids 2>/dev/null
+  sleep 1
+  kill -KILL $pid $kids 2>/dev/null
+}
+
+cmd_preflight() {
+  need_jq
+  [ -n "$CODEX_HOME_ARG" ] && [ -n "$WORKDIR" ] || usage
+  local home workdir version override hash cfg key cache_dir marker tmp flag pidfile deadline ticks f
+  local init inited list resp_line entry enabled trust current warnings errors
+  # codex 0.144.0 does not create a missing CODEX_HOME (`codex exec` fails with
+  # "Error finding codex home"), so a missing -H is a hard error here too.
+  home=$(cd "$CODEX_HOME_ARG" 2>/dev/null && pwd) || { echo "preflight: codex home not found: $CODEX_HOME_ARG (CODEX_HOME must be an existing directory; codex does not create it)" >&2; exit 1; }
+  workdir=$(cd "$WORKDIR" 2>/dev/null && pwd) || { echo "preflight: workdir not found: $WORKDIR" >&2; exit 1; }
+  command -v codex >/dev/null 2>&1 || { echo "preflight: codex not found on PATH" >&2; exit 1; }
+  version=$(codex --version 2>/dev/null | head -1)
+  [ -n "$version" ] || { echo "preflight: 'codex --version' printed nothing" >&2; exit 1; }
+  deadline=${CODEX_GUARD_PREFLIGHT_TIMEOUT:-60}
+  case "$deadline" in ''|*[!0-9]*|0) echo "preflight: CODEX_GUARD_PREFLIGHT_TIMEOUT must be a positive integer (seconds), got '${CODEX_GUARD_PREFLIGHT_TIMEOUT:-}'" >&2; exit 1 ;; esac
+  override=$(build_override) || { echo "preflight: override generation failed" >&2; exit 1; }
+  hash=$(compute_hash)
+  cfg=$(seed_fingerprint "$home")
+  key=$(printf '%s' "$version|$home|$override|$cfg" | shasum -a 256 | cut -d' ' -f1)
+  cache_dir="${SUBFLEET_CODEX_GUARD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/subfleet-codex}"
+  marker="$cache_dir/guard-ok-$key"
+  if [ -z "$NO_CACHE" ] && [ -f "$marker" ]; then
+    echo "preflight: cached ok ($version)"
+    exit 0
+  fi
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/subfleet-guard-preflight.XXXXXX") || { echo "preflight: mktemp failed" >&2; exit 1; }
+  flag="$tmp/done"; pidfile="$tmp/pid"
+  # Scratch CODEX_HOME for the probe: codex app-server writes its own state
+  # (sqlite DBs, installation_id, .personality_migration, tmp/) into whatever
+  # CODEX_HOME it starts with, and its personality migration rewrites a
+  # config.toml that sits next to a session store. Seed a scratch home with a
+  # copy of the lane's user-layer hook sources instead so the lane home is
+  # never touched and the probe still sees the lane's [hooks]/[features] config.
+  mkdir "$tmp/home" || { echo "preflight: cannot create scratch home under $tmp" >&2; rm -rf "$tmp"; exit 1; }
+  for f in $SEED_FILES; do
+    if [ -f "$home/$f" ]; then
+      cp "$home/$f" "$tmp/home/$f" 2>/dev/null || echo "preflight: warning: could not copy $home/$f into the scratch home" >&2
+    fi
+  done
+  init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"subfleet-guard-preflight","title":"subfleet-guard preflight","version":"0.0.1"}}}'
+  inited='{"jsonrpc":"2.0","method":"initialized","params":{}}'
+  list=$(jq -cn --arg cwd "$workdir" '{jsonrpc:"2.0",id:2,method:"hooks/list",params:{cwds:[$cwd]}}')
+  ticks=$((deadline * 5))
+  # bash 3.2 (no coproc). Writer: sends the three requests, keeps app-server's
+  # stdin open until the reader has flagged completion (id-2 response seen, or
+  # EOF from app-server) or the deadline passes; then closes stdin (a healthy
+  # app-server exits on EOF within ~0.1s), waits up to 5s, and TERM/KILLs
+  # whatever is left. `sh -c` records app-server's pid before exec-ing it.
+  # Reader: captures the id-2 line, then flags completion — also on EOF, so an
+  # app-server that dies without answering fails the preflight immediately
+  # instead of after the full deadline. Bound: deadline + ~7s.
+  { trap '' PIPE
+    printf '%s\n' "$init" "$inited" "$list"
+    i=0; while [ $i -lt $ticks ] && [ ! -f "$flag" ]; do sleep 0.2; i=$((i+1)); done
+    [ -f "$flag" ] || : > "$tmp/timeout"
+    exec >&-
+    if [ -f "$flag" ]; then
+      i=0; while [ $i -lt 25 ] && pid_alive "$pidfile"; do sleep 0.2; i=$((i+1)); done
+    fi
+    pid_alive "$pidfile" && kill_tree "$(cat "$pidfile")"
+  } 2>/dev/null \
+    | CODEX_HOME="$tmp/home" /bin/sh -c 'printf "%s\n" "$$" > "$0" && exec "$@"' "$pidfile" \
+        codex app-server -c features.plugins=false -c "$override" 2>"$tmp/err" \
+    | { while IFS= read -r line; do
+          case "$line" in
+            *'"id":2'*)
+              if printf '%s' "$line" | jq -e '.id == 2' >/dev/null 2>&1; then
+                printf '%s\n' "$line" > "$tmp/resp"; break
+              fi ;;
+          esac
+        done
+        : > "$flag"; }
+  # Belt and braces: the writer can die early (SIGPIPE before its trap, or a
+  # killed shell); never leave a probe app-server behind.
+  pid_alive "$pidfile" && kill_tree "$(cat "$pidfile")"
+
+  if [ ! -s "$tmp/resp" ]; then
+    if [ -f "$tmp/timeout" ]; then
+      echo "preflight: FAILED — no hooks/list response within ${deadline}s from 'codex app-server' ($version); app-server killed" >&2
+    else
+      echo "preflight: FAILED — 'codex app-server' exited without answering hooks/list ($version)" >&2
+    fi
+    [ -s "$tmp/err" ] && { echo "preflight: app-server stderr tail:" >&2; tail -5 "$tmp/err" >&2; }
+    rm -rf "$tmp"
+    exit 1
+  fi
+  resp_line=$(cat "$tmp/resp")
+  warnings=$(printf '%s' "$resp_line" | jq -r '(.result.data[0].warnings // []) | .[]' 2>/dev/null)
+  errors=$(printf '%s' "$resp_line" | jq -r '(.result.data[0].errors // []) | .[]' 2>/dev/null)
+  [ -n "$warnings" ] && printf 'preflight: hooks/list warning: %s\n' "$warnings" >&2
+  [ -n "$errors" ] && printf 'preflight: hooks/list error: %s\n' "$errors" >&2
+  entry=$(printf '%s' "$resp_line" | jq -c --arg key "$KEY" '(.result.data[0].hooks // []) | map(select(.key==$key)) | .[0] // empty' 2>/dev/null)
+  if [ -z "$entry" ]; then
+    echo "preflight: FAILED — hook not listed under key $KEY ($version). Response: $(printf '%s' "$resp_line" | cut -c1-600)" >&2
+    [ -s "$tmp/err" ] && { echo "preflight: app-server stderr tail:" >&2; tail -5 "$tmp/err" >&2; }
+    rm -rf "$tmp"
+    exit 1
+  fi
+  enabled=$(printf '%s' "$entry" | jq -r '.enabled')
+  trust=$(printf '%s' "$entry" | jq -r '.trustStatus // empty')
+  current=$(printf '%s' "$entry" | jq -r '.currentHash // empty')
+  rm -rf "$tmp"
+  if [ "$enabled" = "true" ] && [ "$trust" = "trusted" ]; then
+    if [ -z "$NO_CACHE" ]; then
+      mkdir -p "$cache_dir" 2>/dev/null
+      if printf 'version=%s\nhome=%s\nconfig=%s\ntrust=%s\nverified=%s\n' "$version" "$home" "$cfg" "$hash" "$(date +%Y-%m-%dT%H:%M:%S%z)" > "$marker.tmp.$$" 2>/dev/null; then
+        mv -f "$marker.tmp.$$" "$marker" 2>/dev/null || rm -f "$marker.tmp.$$"
+      fi
+      # Prune markers nobody has refreshed in 30 days (retired lanes, old
+      # codex versions, dead temp homes); a live lane just re-verifies once.
+      find "$cache_dir" -maxdepth 1 -name 'guard-ok-*' -type f -mtime +30 -exec rm -f {} + 2>/dev/null || true
+    fi
+    echo "preflight: ok ($version, trust=$(printf '%s' "$hash" | cut -c8-19))"
+    exit 0
+  fi
+  echo "preflight: FAILED — hook listed but enabled=$enabled trustStatus=$trust currentHash=$current expected=$hash ($version). A codex upgrade that changed the hash scheme, or a disabled hook state, would do this; see docs/guard.md." >&2
+  exit 1
+}
+
+[ $# -ge 1 ] || usage
+sub=$1; shift
+case "$sub" in
+  override) parse_common "$@"; need_jq; build_override || exit 1; echo ;;
+  hash) parse_common "$@"; need_jq; compute_hash || exit 1; echo ;;
+  key) [ $# -eq 0 ] || usage; printf '%s\n' "$KEY" ;;
+  check) cmd_check "$@" ;;
+  preflight) parse_common "$@"; cmd_preflight ;;
+  -h|--help|help) usage ;;
+  *) usage ;;
+esac

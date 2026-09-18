@@ -1,0 +1,9 @@
+#!/bin/bash
+# launchd entrypoint: one watchdog cycle (probe -> snapshot -> alerts -> brief).
+set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/bin:$HOME/.local/bin"
+ROOT="$HOME/chief-of-staff/subfleet"
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+echo "$(date -Iseconds) subfleet watch starting"
+cd "$ROOT" && exec "$PY" -m subfleet.cli watch

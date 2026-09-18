@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Claude Code statusline command + rate-limit tap for subfleet.
+
+Claude Code pipes a JSON blob to the statusline on every render; it includes
+rate_limits.five_hour / seven_day used_percentage. This script:
+  1. renders a short status string (model · 5h% · wk% · dir),
+  2. tees rate_limits to ~/chief-of-staff/state/subfleet/claude-statusline.json
+     (atomic write) plus a throttled history line on >=1pp change,
+  3. drops a claude-statusline-invoked.json breadcrumb on EVERY invocation
+     (rate_limits present or not), so "is the tap firing at all?" is
+     answerable from state.
+
+SURFACE CAVEAT (diagnosed 2026-08-12): statusLine commands run only in the
+terminal CLI's interactive TUI. The desktop app, SDK/`claude -p` runs, and
+claude.ai/code sessions never invoke them — an active app session produced
+zero invocations while this was tested, and the payload schema (verified in
+CLI binaries 2.1.175–2.1.218) never changed. Max works in the app, so the last
+real capture is 2026-07-22; consumers must rank this state by updated_at
+(subfleet.claude.pick_live_source) rather than trust it as current.
+
+Deliberately stdlib-only and defensive: statuslines run on every render, so it
+must be fast (<50ms) and must never crash or block the UI.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import time
+
+STATE_DIR = os.path.expanduser(
+    os.environ.get("SUBFLEET_STATE_DIR") or os.environ.get("CARPOOL_STATE_DIR") or "~/chief-of-staff/state/subfleet"
+)
+STATE_FILE = os.path.join(STATE_DIR, "claude-statusline.json")
+HISTORY_FILE = os.path.join(STATE_DIR, "claude-statusline-history.jsonl")
+INVOKED_FILE = os.path.join(STATE_DIR, "claude-statusline-invoked.json")
+
+
+def record_invocation(data: dict, rl: dict) -> None:
+    """Liveness breadcrumb, written even when rate_limits is absent.
+
+    The quota tee below only fires when the payload carries rate_limits, so a
+    stale claude-statusline.json is ambiguous: no renders, or renders without
+    quota? This file disambiguates (throttled to once a minute).
+    """
+    try:
+        try:
+            if time.time() - os.path.getmtime(INVOKED_FILE) < 60:
+                return
+        except OSError:
+            pass
+        os.makedirs(STATE_DIR, exist_ok=True)
+        out = {
+            "invoked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "had_rate_limits": bool(rl),
+            "model": ((data.get("model") or {}).get("display_name")) or "",
+            "version": data.get("version"),
+        }
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".sl.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(out, f)
+        os.replace(tmp, INVOKED_FILE)
+    except Exception:
+        pass
+
+
+def main() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        data = {}
+    rl = data.get("rate_limits") or {}
+    model = ((data.get("model") or {}).get("display_name")) or ""
+    record_invocation(data, rl)
+
+    def pct(key):
+        w = rl.get(key) or {}
+        v = w.get("used_percentage")
+        return v if isinstance(v, (int, float)) else None
+
+    five, week = pct("five_hour"), pct("seven_day")
+
+    if rl:
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            prev = {}
+            try:
+                with open(STATE_FILE) as f:
+                    prev = json.load(f)
+            except Exception:
+                pass
+            out = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "model": model,
+                "session_id": data.get("session_id"),
+                "rate_limits": rl,
+            }
+            fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".sl.")
+            with os.fdopen(fd, "w") as f:
+                json.dump(out, f)
+            os.replace(tmp, STATE_FILE)
+
+            def prev_pct(key):
+                w = (prev.get("rate_limits") or {}).get(key) or {}
+                v = w.get("used_percentage")
+                return v if isinstance(v, (int, float)) else None
+
+            moved = any(
+                new is not None and (old is None or abs(new - old) >= 1)
+                for new, old in ((five, prev_pct("five_hour")), (week, prev_pct("seven_day")))
+            )
+            if moved:
+                with open(HISTORY_FILE, "a") as f:
+                    f.write(json.dumps({"ts": out["updated_at"], "five_hour": five, "seven_day": week}) + "\n")
+        except Exception:
+            pass
+
+    parts = []
+    if model:
+        parts.append(model)
+    if five is not None:
+        parts.append(f"5h {round(five)}%")
+    if week is not None:
+        parts.append(f"wk {round(week)}%")
+    cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or ""
+    if cwd:
+        parts.append(os.path.basename(cwd))
+    print(" · ".join(parts) if parts else "·")
+
+
+if __name__ == "__main__":
+    main()

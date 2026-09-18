@@ -1,0 +1,12 @@
+{
+  "_comment": "Codex/ChatGPT-side account config, sibling of claude-accounts.json (env override: SUBFLEET_CODEX_ACCOUNTS). The account backing the interactive ChatGPT/Codex apps is read live from ~/.codex/auth.json; protected_account is only the fallback when that file is missing or unreadable, matched on email or account_id (accepts an object, a bare string, or a list of either). auto_reset governs `subfleet reset codex --policy`. Copy to codex-accounts.json (gitignored).",
+  "protected_account": {
+    "email": "user1@example.com",
+    "account_id": "00000000-0000-4000-8000-000000000000"
+  },
+  "auto_reset": {
+    "enabled": true,
+    "headroom_floor_pct": 15,
+    "min_interval_min": 30
+  }
+}

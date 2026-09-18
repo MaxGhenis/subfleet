@@ -1,0 +1,10 @@
+{
+  "_comment": "Claude account roster. `accounts` lists every account that may serve as a lane; `enrolled` maps an account to the keychain item holding its setup token (`subfleet enroll <email>`). Copy this file to claude-accounts.json (gitignored) or point DELEGATE_ACCOUNTS_FILE at your copy.",
+  "enrolled": {
+    "user1@example.com": "claude-quota-user1@example.com"
+  },
+  "accounts": [
+    "user1@example.com",
+    "user2@example.com"
+  ]
+}

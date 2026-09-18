@@ -1,0 +1,899 @@
+#!/bin/bash
+# subfleet claude (subfleet-claude) — hardened headless Claude Code dispatch, pinned to an enrolled
+# account lane. The Claude-side analog of `subfleet codex` + `subfleet pick`.
+#
+# Identity = lane, not login: each enrolled account's `claude setup-token`
+# OAuth token lives in the agent keychain (claude-quota-<email>, stored by
+# `subfleet enroll <email>`), and the run pins it via CLAUDE_CODE_OAUTH_TOKEN —
+# capacity comes from picking a lane, never from rotating the app login.
+#
+# What it hardens:
+#   1. Transient deaths (5xx/overloaded, stream disconnects, connection
+#      refused, 429s): retried with backoff. Hard account limits (session/
+#      weekly/usage, "out of usage credits") are NOT slept on — with -A the run re-picks a different
+#      lane immediately; pinned (-a) runs fail fast (rc=4) so the orchestrator
+#      can re-dispatch.
+#   2. Auth failures (401 / revoked or expired setup-token): fail fast (rc=5)
+#      with the re-enrollment ritual — retrying cannot help. An auth-looking
+#      phrase alone is not proof: the token is re-checked against the OAuth
+#      usage endpoint first (401 = dead; 200/403/429 = it still authenticates),
+#      because 2026-09-03 six live lanes were parked for 30 days on a phrase
+#      match while their tokens still served Opus. An org block
+#      ("organization has disabled … subscription access") stays rc=5 without
+#      a probe — a valid token cannot help there.
+#      A Claude CLI too old for the requested model (400 "Claude Code X does
+#      not support this model; version Y or newer is required"): fail fast
+#      (rc=6) naming `claude update` — not a lane fault, so no lane rotation
+#      and no cooldown.
+#   3. Evaporating uncommitted work on kill/crash: an EXIT/INT/TERM trap
+#      snapshots any dirty state (tracked + untracked) to refs/claude-salvage/*
+#      via a temp index + commit-tree. HEAD, the current branch, the real
+#      index, and the worktree are never touched. Resume: the worktree is
+#      still dirty, so just keep working. List: git for-each-ref refs/claude-salvage
+#   4. Silent model downgrades: after the run, the exact session transcript's
+#      per-message model field is checked (claude-model). The UUID-named
+#      transcript is located independently of Claude's lossy cwd encoding and
+#      must be unique. A positive match writes a .MODEL_ATTESTED marker next to
+#      the output. A lane silently served by a different model gets a
+#      MODEL-DOWNGRADE warning plus a .DOWNGRADED marker. Missing, ambiguous,
+#      or otherwise inconclusive evidence writes neither marker; callers that
+#      require a pinned model must fail closed.
+#   5. Every child attempt reports its session and classified outcome to the
+#      local subfleet ledger hook. Accounting is best-effort and can never
+#      change the lane runner's outcome.
+#
+# Usage:
+#   subfleet claude -a <email> | -A  -C <workdir> -p <prompt_file> -o <out_file> \
+#               [-m <model>] [-s workspace-write|read-only] [-b <salvage_branch>] \
+#               [-R <salvage_remote>] [-r <max_retries>] [-I -D <review_root>] [-d]
+#
+#   -a  account email (token read from keychain item claude-quota-<email>)
+#   -A  auto-pick from subfleet capacity; re-picks if the lane hits a limit.
+#       With -a as well: start on that lane, re-pick on a hard limit.
+#   -m  model (default claude-fable-5-1)
+#   -s  workspace-write (default): --dangerously-skip-permissions;
+#       read-only: explicit plan mode with Read, Glob, Grep, WebSearch, and
+#       WebFetch available for source research;
+#       user/project settings, memory, plugins, MCP, Chrome, skills, and hooks
+#       disabled. Genuine machine-managed policy still applies.
+#   -I  isolated review; requires -s read-only and -D. Run from the neutral -C
+#       directory while exposing review_root through Claude's --add-dir;
+#       only Read, Glob, and Grep are available. Inherited policy-file
+#       overrides are rejected, never silently bypassed
+#   -D  source directory exposed to an isolated reviewer; requires -I
+#   -b  salvage branch — on any exit, push the salvage snapshot (or HEAD) there
+#   -R  remote for the salvage push; default origin
+#   -r  max retries for transient failures; default 2
+#   -d  detach: re-exec in a NEW process session (setsid) and return at once;
+#       progress goes to <out_file base>.lane.log. Survives the launching
+#       shell, a Claude account switch, and the desktop app's idle SIGTERM.
+#   env: SUBFLEET_RUN_ID  ledger entry pre-created by `subfleet run` — adopted
+#        instead of starting a second record. SUBFLEET_RUN_OWNED_PROMPT: a
+#        private delegate-prompt-*.md this runner deletes on exit.
+#        CLAUDE_LANE_MODEL_CHECK_RETRIES / _BACKOFF bound retries while Claude
+#        finishes persisting the exact session transcript (defaults: 4 / 1s).
+#
+# PUBLIC REPOS: the -b salvage push fires on EVERY exit, including success —
+# content reaches the remote BEFORE any review. When origin is public, either
+# omit -b (the salvage ref still protects local work) or pass -R with a
+# private mirror remote; push to origin yourself after review.
+set -u
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+
+# Resolve through ~/bin-style symlinks so both the accounting hook and detached
+# re-exec always use this checkout's instrumented script.
+SCRIPT_SOURCE=${BASH_SOURCE[0]}
+while [ -h "$SCRIPT_SOURCE" ]; do
+  SCRIPT_DIR=$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)
+  SCRIPT_SOURCE=$(readlink "$SCRIPT_SOURCE")
+  case "$SCRIPT_SOURCE" in
+    /*) ;;
+    *) SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE" ;;
+  esac
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd)
+SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "$SCRIPT_SOURCE")"
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)
+
+ORIG_ARGS=("$@")
+EMAIL="" AUTO=0 MODEL="claude-fable-5-1" WORKDIR="" PROMPT_FILE="" OUT_FILE="" REVIEW_ROOT=""
+SANDBOX="workspace-write" SALVAGE_BRANCH="" SALVAGE_REMOTE="origin" MAX_RETRIES=2 DETACH=0 ISOLATED=0
+while getopts "a:Am:C:p:o:s:b:R:r:ID:d" opt; do
+  case "$opt" in
+    a) EMAIL=$OPTARG ;;
+    A) AUTO=1 ;;
+    m) MODEL=$OPTARG ;;
+    C) WORKDIR=$OPTARG ;;
+    p) PROMPT_FILE=$OPTARG ;;
+    o) OUT_FILE=$OPTARG ;;
+    s) SANDBOX=$OPTARG ;;
+    b) SALVAGE_BRANCH=$OPTARG ;;
+    R) SALVAGE_REMOTE=$OPTARG ;;
+    r) MAX_RETRIES=$OPTARG ;;
+    I) ISOLATED=1 ;;
+    D) REVIEW_ROOT=$OPTARG ;;
+    d) DETACH=1 ;;
+    *) exit 2 ;;
+  esac
+done
+[ -n "$EMAIL" ] || [ "$AUTO" = 1 ] || { echo "subfleet claude: need -a <email> or -A" >&2; exit 2; }
+[ -n "$WORKDIR" ] || { echo "subfleet claude: missing -C <workdir>" >&2; exit 2; }
+[ -n "$PROMPT_FILE" ] || { echo "subfleet claude: missing -p <prompt_file>" >&2; exit 2; }
+[ -n "$OUT_FILE" ] || { echo "subfleet claude: missing -o <out_file>" >&2; exit 2; }
+ORIGINAL_OUT_FILE=${SUBFLEET_RUN_ORIGINAL_OUT-$OUT_FILE}
+[ -d "$WORKDIR" ] || { echo "subfleet claude: workdir not found: $WORKDIR" >&2; exit 2; }
+[ -f "$PROMPT_FILE" ] || { echo "subfleet claude: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+case "$SANDBOX" in
+  workspace-write|read-only) ;;
+  *) echo "subfleet claude: -s must be workspace-write or read-only" >&2; exit 2 ;;
+esac
+[ "$ISOLATED" = 0 ] || [ "$SANDBOX" = "read-only" ] \
+  || { echo "subfleet claude: -I requires -s read-only" >&2; exit 2; }
+if [ "$ISOLATED" = 1 ]; then
+  [ -n "$REVIEW_ROOT" ] \
+    || { echo "subfleet claude: -I requires -D <review_root>" >&2; exit 2; }
+  [ -d "$REVIEW_ROOT" ] \
+    || { echo "subfleet claude: review root not found: $REVIEW_ROOT" >&2; exit 2; }
+  # Safe mode retains machine-managed hooks. A parent's override could point
+  # those trusted settings at the very checkout being reviewed; do not load
+  # that path, or silently discard what may be legitimate operator policy.
+  for policy_override in CLAUDE_CODE_MANAGED_SETTINGS_PATH \
+      CLAUDE_CODE_REMOTE_SETTINGS_PATH CLAUDE_CODE_MOCK_REMOTE_SETTINGS; do
+    if [ -n "${!policy_override:-}" ]; then
+      echo "subfleet claude: isolated review refuses inherited $policy_override; resolve the policy override before dispatch" >&2
+      exit 2
+    fi
+  done
+  unset policy_override
+elif [ -n "$REVIEW_ROOT" ]; then
+  echo "subfleet claude: -D requires -I" >&2
+  exit 2
+fi
+command -v jq >/dev/null || { echo "subfleet claude: jq required" >&2; exit 2; }
+command -v uuidgen >/dev/null || { echo "subfleet claude: uuidgen required" >&2; exit 2; }
+
+# Overridable for tests and stripped launchd environments. Without an
+# override, prefer the native installer's launcher (what `claude update`
+# maintains): launchd PATHs put /opt/homebrew/bin first, where a cask frozen
+# at 2.1.87 shadowed a current install on 2026-09-02.
+CLAUDE_BIN=${CLAUDE_LANE_CLAUDE:-}
+if [ -z "$CLAUDE_BIN" ]; then
+  if [ -x "$HOME/.local/bin/claude" ]; then
+    CLAUDE_BIN=$HOME/.local/bin/claude
+  else
+    CLAUDE_BIN=claude
+  fi
+fi
+AGENT_SECRET=${CLAUDE_LANE_AGENT_SECRET:-$HOME/bin/agent-secret}
+CLAUDE_MODEL_BIN=${CLAUDE_LANE_CLAUDE_MODEL:-$(dirname "$0")/claude-model}
+[ -x "$CLAUDE_MODEL_BIN" ] || CLAUDE_MODEL_BIN=$(command -v claude-model || true)
+SUBFLEET=${CLAUDE_LANE_SUBFLEET:-$REPO_ROOT/bin/subfleet}
+CLAUDE_PICK=${CLAUDE_LANE_PICK:-}
+BACKOFF_BASE=${CLAUDE_LANE_BACKOFF:-60}
+MODEL_CHECK_RETRIES=${CLAUDE_LANE_MODEL_CHECK_RETRIES:-4}
+MODEL_CHECK_BACKOFF=${CLAUDE_LANE_MODEL_CHECK_BACKOFF:-1}
+EXCLUDED_LANES=()
+EXCLUDED_COUNT=0
+RUN_ID=""
+SID=""
+# Aliases (fable/opus/…) and retired pins resolve to the canonical full id
+# here, so the served-model check is exact and independent of the CLI's own
+# alias table (a stale CLI maps `fable` to the retired Fable 5). A `[1m]`
+# suffix stays on the dispatch id; transcripts record the bare model.
+if canonical=$("$SUBFLEET" _canonical-model "$MODEL" 2>/dev/null) && [ -n "$canonical" ]; then
+  MODEL=$canonical
+fi
+MODEL_BASE=${MODEL%%\[*}
+case "$MODEL_CHECK_RETRIES" in
+  ""|*[!0-9]*)
+    echo "subfleet claude: CLAUDE_LANE_MODEL_CHECK_RETRIES must be a nonnegative integer" >&2
+    exit 2 ;;
+esac
+case "$MODEL_CHECK_BACKOFF" in
+  ""|*[!0-9]*)
+    echo "subfleet claude: CLAUDE_LANE_MODEL_CHECK_BACKOFF must be a nonnegative integer" >&2
+    exit 2 ;;
+esac
+
+# Resolve once before detach, artifact creation, or hook calls. Besides making
+# the hook cwd-independent, this lets us reject prompt/artifact aliases before
+# any truncating redirection occurs.
+absolute_path() {
+  local dir base
+  dir=$(dirname "$1")
+  base=$(basename "$1")
+  dir=$(cd -P "$dir" >/dev/null 2>&1 && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+RESOLVED=$(cd -P "$WORKDIR" >/dev/null 2>&1 && pwd) \
+  || { echo "subfleet claude: cannot resolve workdir: $WORKDIR" >&2; exit 2; }
+WORKDIR=$RESOLVED
+if [ "$ISOLATED" = 1 ]; then
+  RESOLVED=$(cd -P "$REVIEW_ROOT" >/dev/null 2>&1 && pwd) \
+    || { echo "subfleet claude: cannot resolve review root: $REVIEW_ROOT" >&2; exit 2; }
+  REVIEW_ROOT=$RESOLVED
+fi
+RESOLVED=$(absolute_path "$PROMPT_FILE") \
+  || { echo "subfleet claude: cannot resolve prompt path: $PROMPT_FILE" >&2; exit 2; }
+PROMPT_FILE=$RESOLVED
+RESOLVED=$(absolute_path "$OUT_FILE") \
+  || { echo "subfleet claude: output directory not found: $(dirname "$OUT_FILE")" >&2; exit 2; }
+OUT_FILE=$RESOLVED
+
+BASE="${OUT_FILE%.md}"
+ERR_FILE="$BASE.err.log"
+RAW_FILE="$BASE.result.json"
+LANE_LOG=${SUBFLEET_RUN_LANE_LOG:-$BASE.lane.log}
+DOWNGRADED_FILE="$BASE.DOWNGRADED"
+MODEL_ATTESTED_FILE="$BASE.MODEL_ATTESTED"
+
+same_file() {
+  [ "$1" = "$2" ] || { [ -e "$2" ] && [ "$1" -ef "$2" ]; }
+}
+cleanup_run_owned_prompt() {
+  # `subfleet run` hands its private merged prompt to the runner it launches;
+  # only the exact delegate-prompt-*.md it named is ever removed.
+  local owned_prompt=${SUBFLEET_RUN_OWNED_PROMPT:-}
+  [ -n "$owned_prompt" ] || return 0
+  if ! same_file "$owned_prompt" "$PROMPT_FILE"; then
+    echo "subfleet claude: WARNING refusing mismatched owned prompt $owned_prompt" >&2
+    return 1
+  fi
+  case "$(basename "$owned_prompt")" in
+    delegate-prompt-*.md)
+      if ! rm -f "$owned_prompt" || [ -e "$owned_prompt" ]; then
+        echo "subfleet claude: WARNING could not remove owned prompt $owned_prompt" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "subfleet claude: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Inherited lane markers do not prove ownership; the detached re-exec must
+# point at the exact prompt file this process was asked to consume.
+DETACHED_CHILD=0
+if [ "$DETACH" = 1 ] \
+   && [ "${CLAUDE_LANE_DETACHED:-}" = 1 ] \
+   && [ -n "${CLAUDE_LANE_OWNED_PROMPT:-}" ] \
+   && same_file "$PROMPT_FILE" "$CLAUDE_LANE_OWNED_PROMPT"; then
+  DETACHED_CHILD=1
+fi
+ARTIFACTS=("$PROMPT_FILE" "$OUT_FILE" "$ERR_FILE" "$RAW_FILE" "$LANE_LOG" "$DOWNGRADED_FILE" "$MODEL_ATTESTED_FILE")
+for ((left = 0; left < ${#ARTIFACTS[@]}; left++)); do
+  for ((right = left + 1; right < ${#ARTIFACTS[@]}; right++)); do
+    if same_file "${ARTIFACTS[$left]}" "${ARTIFACTS[$right]}"; then
+      echo "subfleet claude: prompt/output artifacts must not alias: ${ARTIFACTS[$left]} = ${ARTIFACTS[$right]}" >&2
+      exit 2
+    fi
+  done
+done
+
+# The markers describe the current output only. Clear them as soon as this
+# invocation has resolved and validated its paths, even if auth fails later.
+rm -f "$DOWNGRADED_FILE" "$MODEL_ATTESTED_FILE"
+
+if [ "$DETACH" = 1 ] && [ "$DETACHED_CHILD" = 0 ]; then
+  DETACH_TMP_ROOT=${CLAUDE_LANE_TMPDIR:-${TMPDIR:-/tmp}}
+  DETACH_TMP_ROOT=${DETACH_TMP_ROOT%/}
+  DETACHED_PROMPT=$(mktemp "$DETACH_TMP_ROOT/subfleet-claude-prompt.XXXXXX") \
+    || { echo "subfleet claude: could not allocate detached prompt" >&2; exit 2; }
+  if ! cp "$PROMPT_FILE" "$DETACHED_PROMPT"; then
+    rm -f "$DETACHED_PROMPT"
+    echo "subfleet claude: could not preserve prompt for detached child" >&2
+    exit 2
+  fi
+  # The child reads its own private copy; a delegate-owned original is done.
+  cleanup_run_owned_prompt || true
+  unset SUBFLEET_RUN_OWNED_PROMPT
+  export CLAUDE_LANE_DETACHED=1
+  export CLAUDE_LANE_OWNED_PROMPT="$DETACHED_PROMPT"
+  export SUBFLEET_RUN_LANE_LOG="$LANE_LOG"
+  # A final -p wins if the caller used either `-p path` or `-ppath`. The child
+  # runs in a NEW process session (setsid): plain nohup stays in the launching
+  # shell's process group, which the desktop app SIGTERMs on pause/idle and
+  # which dies with a Claude account switch. macOS has no setsid binary;
+  # python does the call, then execs this script under the same pid.
+  if command -v python3 >/dev/null; then
+    python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$SCRIPT_SOURCE" "${ORIG_ARGS[@]}" -p "$DETACHED_PROMPT" \
+      </dev/null >>"$LANE_LOG" 2>&1 &
+  else
+    nohup "$SCRIPT_SOURCE" "${ORIG_ARGS[@]}" -p "$DETACHED_PROMPT" \
+      </dev/null >>"$LANE_LOG" 2>&1 &
+  fi
+  pid=$!
+  disown "$pid" 2>/dev/null || true
+  echo "subfleet claude: detached pid=$pid · log=$LANE_LOG · out=$OUT_FILE"
+  exit 0
+fi
+
+salvage() {
+  git -C "$WORKDIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local salvage_sha=""
+  if [ -n "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
+    local gitdir tmpidx tree parent branch ts ref
+    gitdir=$(git -C "$WORKDIR" rev-parse --absolute-git-dir 2>/dev/null)
+    parent=$(git -C "$WORKDIR" rev-parse --verify HEAD 2>/dev/null)
+    if [ -n "$gitdir" ] && [ -n "$parent" ]; then
+      tmpidx="$gitdir/claude-salvage-index.$$"
+      # Snapshot into a temp index: never touches HEAD, branch, real index, or worktree.
+      if GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" read-tree "$parent" 2>/dev/null \
+         && GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" add -A 2>/dev/null; then
+        tree=$(GIT_INDEX_FILE="$tmpidx" git -C "$WORKDIR" write-tree 2>/dev/null)
+        if [ -n "$tree" ]; then
+          salvage_sha=$(git -C "$WORKDIR" commit-tree "$tree" -p "$parent" \
+            -m "WIP salvage: subfleet claude auto-commit (lane=${EMAIL:-unpicked} model=$MODEL)" 2>/dev/null)
+        fi
+      fi
+      rm -f "$tmpidx"
+      if [ -n "$salvage_sha" ]; then
+        branch=$(git -C "$WORKDIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+        ts=$(date +%Y%m%d-%H%M%S)
+        ref="refs/claude-salvage/${branch//\//-}-$ts-$$"
+        git -C "$WORKDIR" update-ref "$ref" "$salvage_sha" 2>/dev/null \
+          && echo "subfleet claude: salvaged dirty state → $ref ($(git -C "$WORKDIR" rev-parse --short "$salvage_sha")); branch/worktree untouched" >&2
+      else
+        echo "subfleet claude: WARNING dirty state present but salvage snapshot failed (unborn HEAD?) — worktree left as-is" >&2
+      fi
+    fi
+  fi
+  if [ -n "$SALVAGE_BRANCH" ]; then
+    local push_src="${salvage_sha:-HEAD}"
+    git -C "$WORKDIR" push -qf "$SALVAGE_REMOTE" "$push_src:refs/heads/$SALVAGE_BRANCH" 2>/dev/null \
+      && echo "subfleet claude: pushed $push_src → $SALVAGE_REMOTE/$SALVAGE_BRANCH" >&2
+  fi
+}
+
+cleanup_owned_prompt() {
+  local detach_tmp_root=${CLAUDE_LANE_TMPDIR:-${TMPDIR:-/tmp}} owned_prompt
+  cleanup_run_owned_prompt || return 1
+  [ "$DETACHED_CHILD" = 1 ] || return 0
+  detach_tmp_root=${detach_tmp_root%/}
+  owned_prompt=${CLAUDE_LANE_OWNED_PROMPT:-}
+  case "$owned_prompt" in
+    "") return 0 ;;
+    "$detach_tmp_root"/subfleet-claude-prompt.*)
+      if ! rm -f "$owned_prompt" || [ -e "$owned_prompt" ]; then
+        echo "subfleet claude: WARNING could not remove owned prompt $owned_prompt" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "subfleet claude: WARNING refusing unexpected owned prompt path $owned_prompt" >&2
+      return 1
+      ;;
+  esac
+}
+
+record_run_start() {
+  local record_args
+  if [ -n "${SUBFLEET_RUN_ID:-}" ]; then
+    # `subfleet run` pre-created the entry; fill in what only the runner knows.
+    record_args=(
+      _record-run --phase adopt --run-id "$SUBFLEET_RUN_ID" --pid $$
+      --out "$OUT_FILE" --err "$ERR_FILE" --lane-log "$LANE_LOG"
+    )
+    [ -z "$EMAIL" ] || record_args+=(--lane "$EMAIL")
+    RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+    [ -z "$RUN_ID" ] || return 0
+  fi
+  record_args=(
+    _record-run --phase start --family claude --model "$MODEL"
+    --lane "$EMAIL" --workdir "$WORKDIR" --prompt "$PROMPT_FILE"
+    --out "$OUT_FILE" --err "$ERR_FILE" --original-out "$ORIGINAL_OUT_FILE"
+    --pid $$ --launcher "subfleet claude"
+  )
+  if [ "$DETACHED_CHILD" = 1 ] || [ -n "${SUBFLEET_RUN_LANE_LOG:-}" ]; then
+    record_args+=(--lane-log "$LANE_LOG")
+  fi
+  RUN_ID=$("$SUBFLEET" "${record_args[@]}" 2>/dev/null) || RUN_ID=""
+}
+
+record_run_lane() {
+  [ -n "$RUN_ID" ] || return 0
+  "$SUBFLEET" _record-run --phase update --run-id "$RUN_ID" \
+    --lane "$EMAIL" >/dev/null 2>&1 || true
+}
+
+record_run_finish() {
+  local final_rc=$1
+  local record_args
+  [ -n "$RUN_ID" ] || return 0
+  record_args=(
+    _record-run --phase finish --run-id "$RUN_ID" --lane "$EMAIL" --rc "$final_rc"
+  )
+  [ -z "$SID" ] || record_args+=(--session-id "$SID")
+  "$SUBFLEET" "${record_args[@]}" >/dev/null 2>&1 || true
+}
+
+on_exit() {
+  local final_rc=$?
+  trap - EXIT
+  # Never let a private caller prompt enter the salvage tree or remote push.
+  if ! cleanup_owned_prompt; then
+    echo "subfleet claude: WARNING skipping salvage and push to protect the private prompt" >&2
+  else
+    salvage
+  fi
+  record_run_finish "$final_rc"
+  exit "$final_rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$DETACHED_CHILD" = 1 ] && [ -n "${CLAUDE_LANE_DETACHED_START_DELAY:-}" ]; then
+  sleep "$CLAUDE_LANE_DETACHED_START_DELAY"
+fi
+
+lane_is_excluded() {
+  local candidate=$1 excluded
+  [ "$EXCLUDED_COUNT" -gt 0 ] || return 1
+  for excluded in "${EXCLUDED_LANES[@]}"; do
+    [ "$candidate" = "$excluded" ] && return 0
+  done
+  return 1
+}
+
+exclude_lane() {
+  if ! lane_is_excluded "$1"; then
+    EXCLUDED_LANES[$EXCLUDED_COUNT]=$1
+    EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
+  fi
+}
+
+pick_lane() {
+  local picked excluded tries=0
+  local pick_args
+  while [ $tries -lt 32 ]; do
+    tries=$((tries + 1))
+    if [ -n "$CLAUDE_PICK" ]; then
+      # Compatibility pickers may not understand exclusions. Re-invoke a
+      # stateful picker until it yields a lane this run has not rejected.
+      picked=$("$CLAUDE_PICK") || return 1
+    else
+      pick_args=(pick claude --model "$MODEL")
+      if [ "$EXCLUDED_COUNT" -gt 0 ]; then
+        for excluded in "${EXCLUDED_LANES[@]}"; do
+          pick_args+=(--exclude "$excluded")
+        done
+      fi
+      picked=$("$SUBFLEET" "${pick_args[@]}") || return 1
+    fi
+    [ -n "$picked" ] || return 1
+    if ! lane_is_excluded "$picked"; then
+      EMAIL=$picked
+      record_run_lane
+      return 0
+    fi
+  done
+  return 1
+}
+
+fetch_token() {
+  TOKEN=$("$AGENT_SECRET" get "claude-quota-$EMAIL" 2>/dev/null)
+  if [ -z "$TOKEN" ]; then
+    echo "subfleet claude: no keychain token for $EMAIL (claude-quota-$EMAIL)" >&2
+    echo "subfleet claude: enroll (Max-only): claude setup-token   # sign into $EMAIL" >&2
+    echo "subfleet claude:                    subfleet enroll $EMAIL" >&2
+    return 1
+  fi
+}
+
+# Does the lane's token still authenticate? Setup-tokens are inference-scoped,
+# so the usage endpoint answers 403 (scope) for a live token, 401 for a dead
+# one, 429 when the account is throttled — all three but 401 prove the token is
+# alive. CLAUDE_LANE_AUTH_PROBE=alive|dead|unknown short-circuits (tests,
+# offline); no curl or a network failure yields "unknown".
+token_auth_state() {
+  case "${CLAUDE_LANE_AUTH_PROBE:-}" in
+    alive|dead|unknown) printf '%s\n' "$CLAUDE_LANE_AUTH_PROBE"; return 0 ;;
+  esac
+  local curl_bin=${CLAUDE_LANE_CURL:-curl} code
+  command -v "$curl_bin" >/dev/null 2>&1 || { printf 'unknown\n'; return 0; }
+  code=$("$curl_bin" -s -o /dev/null -w '%{http_code}' --max-time 8 \
+    -H "Authorization: Bearer $TOKEN" -H "anthropic-beta: oauth-2025-04-20" \
+    -H "Accept: application/json" https://api.anthropic.com/api/oauth/usage 2>/dev/null) || code=000
+  case "$code" in
+    401) printf 'dead\n' ;;
+    200|403|429) printf 'alive\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# The JSON envelope's `.result` is a rendering of the final message; the
+# session transcript holds the message's text blocks verbatim. 2026-09-04: a
+# 64,613 B `.out` ended on its sentinel with every frame header intact and had
+# lost 1,912 interior characters (19 elisions inside frame bodies) — only the
+# per-frame SHA recomputation caught it, and the lane's durable copy proved
+# the lane had computed correctly. When the transcript's last assistant text
+# is longer than the captured `.result`, take the transcript bytes, keep the
+# envelope rendering beside them, and say so in the lane log.
+prefer_transcript_text() {
+  local projects_root transcript text_file
+  projects_root=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
+  [ -d "$projects_root" ] || return 0
+  transcript=$(find "$projects_root" -maxdepth 2 -name "$SID.jsonl" 2>/dev/null | head -1)
+  [ -n "$transcript" ] && [ -s "$transcript" ] || return 0
+  text_file="$BASE.transcript-text.md"
+  # python, not jq: the transcript is JSONL with large text blocks, and the
+  # extraction must be exact bytes (no re-rendering).
+  if ! python3 - "$transcript" "$SID" > "$text_file" 2>/dev/null <<'PYEOF'
+import json, sys
+path, sid = sys.argv[1], sys.argv[2]
+last = None
+with open(path, encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("type") == "assistant" and row.get("sessionId") == sid:
+            last = row
+if last is None:
+    sys.exit(0)
+content = (last.get("message") or {}).get("content")
+if isinstance(content, str):
+    text = content
+elif isinstance(content, list):
+    text = "".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text")
+else:
+    text = ""
+sys.stdout.write(text)
+PYEOF
+  then
+    rm -f "$text_file"; return 0
+  fi
+  local out_bytes text_bytes
+  out_bytes=$(wc -c < "$OUT_FILE" | tr -d ' ')
+  text_bytes=$(wc -c < "$text_file" | tr -d ' ')
+  if [ "$text_bytes" -gt "$out_bytes" ] && ! cmp -s "$text_file" "$OUT_FILE"; then
+    cp -p "$OUT_FILE" "$BASE.result-text.md"
+    cp -p "$text_file" "$OUT_FILE"
+    echo "subfleet claude: OUT taken from the session transcript — the JSON result rendering was $((text_bytes - out_bytes)) bytes shorter than the final message (kept as $(basename "$BASE.result-text.md"))" >&2
+  fi
+  rm -f "$text_file"
+}
+
+pick_lane_with_token() {
+  local tries=0
+  while [ $tries -lt 32 ]; do
+    tries=$((tries + 1))
+    pick_lane || return 1
+    fetch_token && return 0
+    exclude_lane "$EMAIL"
+  done
+  return 1
+}
+
+# Record one completed child attempt. The hook is deliberately synchronous so
+# its err/raw inputs cannot be overwritten by a retry before they are parsed.
+# Any missing command, exception, or nonzero hook exit is ignored.
+record_lane_run() {
+  local classified_rc=$1
+  "$SUBFLEET" _record-lane-run \
+    --email "$EMAIL" \
+    --model "$MODEL" \
+    --session-id "$SID" \
+    --rc "$classified_rc" \
+    --workdir "$WORKDIR" \
+    --err-file "$ERR_FILE" \
+    --raw-file "$RAW_FILE" \
+    >/dev/null 2>&1 || true
+}
+
+# The transcript's per-message model field is ground truth for what actually
+# served the lane (a safety-classifier fallback silently swaps in Opus).
+model_matches_requested() {
+  local served=$1
+  case "$MODEL_BASE" in
+    fable|opus|sonnet|haiku)
+      # only reached when the canonical lookup above was unavailable
+      case "$served" in
+        "$MODEL_BASE"|"claude-$MODEL_BASE"|"claude-$MODEL_BASE"-*) return 0 ;;
+      esac ;;
+    *)
+      case "$served" in
+        "$MODEL_BASE"|"$MODEL_BASE"-*) return 0 ;;
+      esac ;;
+  esac
+  return 1
+}
+
+check_model() {
+  if [ -z "$CLAUDE_MODEL_BIN" ] || [ ! -x "$CLAUDE_MODEL_BIN" ]; then
+    echo "subfleet claude: claude-model not found — skipping served-model check" >&2
+    return 0
+  fi
+  local report="" latest="" failure="checker failed" attempt=0 checks=0
+  local config_root=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  case "$config_root" in
+    /*) ;;
+    *) config_root=$WORKDIR/$config_root ;;
+  esac
+  local projects_root=$config_root/projects
+  local candidate scan_file transcript_path transcript_arg transcript_count
+  local transcript_model transcript_models transcript_mismatch
+  while [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; do
+    checks=$((checks + 1))
+    transcript_path=""
+    transcript_count=0
+    scan_file=""
+    if ! scan_file=$(mktemp "${TMPDIR:-/tmp}/subfleet-model-scan.XXXXXX" 2>/dev/null); then
+      failure="session transcript scan setup failed"
+      attempt=$((attempt + 1))
+      if [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; then
+        sleep "$MODEL_CHECK_BACKOFF"
+      fi
+      continue
+    fi
+    if [ -d "$projects_root" ] && ! find "$projects_root" \
+        -mindepth 2 -maxdepth 2 -type f -name "$SID.jsonl" \
+        -print0 >"$scan_file" 2>/dev/null; then
+      rm -f "$scan_file"
+      failure="session transcript scan failed"
+      attempt=$((attempt + 1))
+      if [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; then
+        sleep "$MODEL_CHECK_BACKOFF"
+      fi
+      continue
+    fi
+    while IFS= read -r -d '' candidate; do
+      transcript_path=$candidate
+      transcript_count=$((transcript_count + 1))
+    done < "$scan_file"
+    rm -f "$scan_file"
+    if [ ! -d "$projects_root" ]; then
+      transcript_count=0
+    fi
+    if [ "$transcript_count" -eq 0 ]; then
+      report=""
+      latest=""
+      failure="session transcript not found"
+      attempt=$((attempt + 1))
+      if [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; then
+        sleep "$MODEL_CHECK_BACKOFF"
+      fi
+      continue
+    elif [ "$transcript_count" -gt 1 ]; then
+      report=""
+      latest=""
+      failure="ambiguous session transcript"
+      break
+    fi
+    transcript_arg=$transcript_path
+    if ! transcript_models=$(jq -er -s --arg sid "$SID" '
+      if length == 0 then error("empty transcript")
+      elif any(.[]; type != "object") then error("non-object transcript row")
+      else
+        [.[] | select(.type == "assistant")] as $assistant
+        | if ($assistant | length) == 0 then error("no assistant turns")
+          elif any($assistant[]; .sessionId != $sid) then error("assistant session mismatch")
+          elif any($assistant[];
+            ((.message.model | type) != "string") or .message.model == ""
+          ) then error("missing assistant model")
+          else $assistant[].message.model
+          end
+      end
+    ' "$transcript_arg" 2>/dev/null); then
+      failure="session transcript incomplete or invalid"
+      attempt=$((attempt + 1))
+      if [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; then
+        sleep "$MODEL_CHECK_BACKOFF"
+      fi
+      continue
+    fi
+    transcript_mismatch=""
+    while IFS= read -r transcript_model; do
+      if ! model_matches_requested "$transcript_model"; then
+        transcript_mismatch=$transcript_model
+        break
+      fi
+    done <<< "$transcript_models"
+    if [ -n "$transcript_mismatch" ]; then
+      latest=$transcript_mismatch
+      report="transcript: $transcript_arg
+assistant models:
+$transcript_models"
+      break
+    fi
+    if report=$( (cd "$WORKDIR" && "$CLAUDE_MODEL_BIN" -n 10 "$transcript_arg") 2>&1 ); then
+      latest=$(printf '%s\n' "$report" | sed -n 's/^latest: //p' | tail -1)
+      if [ -n "$latest" ]; then
+        break
+      fi
+      failure="no transcript"
+    else
+      latest=""
+      failure="checker failed"
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le "$MODEL_CHECK_RETRIES" ]; then
+      sleep "$MODEL_CHECK_BACKOFF"
+    fi
+  done
+  if [ -z "$latest" ]; then
+    echo "subfleet claude: served-model check inconclusive ($failure after $checks checks for session $SID)" >&2
+    return 0
+  fi
+  if model_matches_requested "$latest"; then
+      if ! {
+        printf 'requested: %s\n' "$MODEL_BASE"
+        printf 'served: %s\n' "$latest"
+        printf 'session: %s\n' "$SID"
+      } > "$MODEL_ATTESTED_FILE"; then
+        echo "subfleet claude: WARNING could not write served-model attestation $MODEL_ATTESTED_FILE" >&2
+      fi
+      echo "subfleet claude: served by $latest (as requested)" >&2
+  else
+    {
+      echo "subfleet claude: MODEL-DOWNGRADE — lane served $latest, requested $MODEL (safety-classifier fallback)."
+      echo "subfleet claude: treat judgment/writing output as unverified; re-run, or route substantive work to a non-Claude reviewer per the downgrade protocol."
+      printf '%s\n' "$report"
+    } | tee "$DOWNGRADED_FILE" >&2
+  fi
+}
+
+record_run_start
+# Nested dispatches from inside the lane must not inherit this run's identity.
+unset SUBFLEET_RUN_DECISION_JSON SUBFLEET_RUN_ORIGINAL_OUT SUBFLEET_RUN_LANE_LOG \
+      SUBFLEET_RUN_ID SUBFLEET_RUN_CALLER_JSON
+
+if [ "$AUTO" = 1 ] && [ -z "$EMAIL" ]; then
+  pick_lane_with_token || { echo "subfleet claude: no dispatchable lane with a usable token" >&2; exit 1; }
+else
+  fetch_token || exit 5
+fi
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  # Record the lane's session id NOW, not only at finish: the registry, the
+  # resume sweep and `subfleet notify` recognise running lanes by this id
+  # (2026-09-04: a fleet-wide notice reached three running lanes and
+  # overwrote their deliverables).
+  [ -z "$RUN_ID" ] || "$SUBFLEET" _record-run --phase update --run-id "$RUN_ID" \
+    --session-id "$SID" >/dev/null 2>&1 || true
+  : > "$OUT_FILE"
+  : > "$RAW_FILE"
+  if [ "$SANDBOX" = "workspace-write" ]; then
+    PERM_ARGS=(--dangerously-skip-permissions)
+  else
+    # Fail closed even when a user's settings default to bypassPermissions.
+    # --tools constrains the built-in tool surface; --allowedTools makes the
+    # permitted tools non-interactive in plan mode. Ordinary read-only tasks
+    # can research web sources; isolated gates only inspect supplied sources.
+    # Safe mode plus an empty strict MCP config removes settings-driven
+    # hooks/plugins/agents/integrations.
+    READ_ONLY_TOOLS="Read,Glob,Grep"
+    [ "$ISOLATED" = 1 ] || READ_ONLY_TOOLS+=",WebSearch,WebFetch"
+    PERM_ARGS=(
+      --permission-mode plan
+      --tools "$READ_ONLY_TOOLS"
+      --allowedTools "$READ_ONLY_TOOLS"
+      --setting-sources ""
+      --safe-mode
+      --no-chrome
+      --strict-mcp-config
+      --mcp-config '{"mcpServers":{}}'
+      --disable-slash-commands
+    )
+    [ "$ISOLATED" = 0 ] || PERM_ARGS+=(--add-dir "$REVIEW_ROOT")
+  fi
+  (
+    cd "$WORKDIR" || exit 97
+    # Lanes bill the subscription via the pinned OAuth token — never the API meter.
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+    if [ "$SANDBOX" = "read-only" ]; then
+      # Pin isolation before Claude initializes, as well as via --safe-mode.
+      # In particular, --add-dir must expose source files without loading
+      # that directory's CLAUDE.md/rules or inherited memory-store content.
+      unset CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD CLAUDE_MEMORY_STORES \
+        CLAUDE_CODE_REMOTE_MEMORY_DIR CLAUDE_COWORK_MEMORY_GUIDELINES \
+        CLAUDE_COWORK_MEMORY_EXTRA_GUIDELINES CLAUDE_COWORK_MEMORY_INDEX_CONTENT \
+        CLAUDE_COWORK_MEMORY_PATH_OVERRIDE
+      export CLAUDE_CODE_SAFE_MODE=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_ORG_MEMORY=1
+    fi
+    CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" exec env \
+      -u CLAUDE_LANE_DETACHED -u CLAUDE_LANE_OWNED_PROMPT -u SUBFLEET_RUN_OWNED_PROMPT \
+      "$CLAUDE_BIN" -p --model "$MODEL" \
+      --session-id "$SID" --output-format json ${PERM_ARGS[@]+"${PERM_ARGS[@]}"}
+  ) <"$PROMPT_FILE" >"$RAW_FILE" 2>"$ERR_FILE"
+  rc=$?
+
+  if [ $rc -eq 0 ] && [ -s "$RAW_FILE" ] && [ "$(jq -r \
+      'if type=="object" and .is_error==false and (.result|type=="string" and length>0) then "ok" else "bad" end' \
+      "$RAW_FILE" 2>/dev/null)" = "ok" ]; then
+    jq -r '.result' "$RAW_FILE" > "$OUT_FILE"
+    prefer_transcript_text
+    if [ -s "$OUT_FILE" ]; then
+      record_lane_run 0
+      echo "subfleet claude: OK lane=$EMAIL model=$MODEL attempt=$attempt bytes=$(wc -c <"$OUT_FILE" | tr -d ' ') session=$SID"
+      check_model
+      exit 0
+    fi
+  fi
+
+  ERRTXT=("$ERR_FILE")
+  [ -s "$RAW_FILE" ] && ERRTXT=("$ERR_FILE" "$RAW_FILE")
+  AUTH_SIGNATURE_FALSE_POSITIVE=0
+  # Claude Code refuses a model newer than itself ("Claude Code 2.1.228 does
+  # not support this model; version 2.1.251 or newer is required"). That is
+  # the host's CLI, not the lane: rotating or cooling lanes cannot help.
+  if grep -qiE "does not support this model" ${ERRTXT[@]+"${ERRTXT[@]}"}; then
+    record_lane_run 1
+    echo "subfleet claude: CLAUDE CLI TOO OLD for model $MODEL — $(grep -h -m1 -ioE 'Claude Code [0-9.]+ does not support this model(; version [0-9.]+ or newer is required)?' ${ERRTXT[@]+"${ERRTXT[@]}"} | head -1). Run: claude update" >&2
+    exit 6
+  fi
+  # "organization has disabled Claude subscription access for Claude Code"
+  # (seen on one org account 2026-08-23): the account exists but cannot
+  # serve lanes at all — same class as a dead token: rotate, long cooldown.
+  if grep -qiE "401|unauthoriz|authentication_error|oauth token|token.*(revoked|expired)|invalid.*api.?key|organization has disabled|subscription access" \
+      ${ERRTXT[@]+"${ERRTXT[@]}"}; then
+    auth_phrase=$(grep -h -m1 -ioE '401|unauthoriz[a-z]*|authentication_error|oauth token|token[^|]{0,40}(revoked|expired)|invalid[^|]{0,20}api.?key|organization has disabled|subscription access' ${ERRTXT[@]+"${ERRTXT[@]}"} | head -1)
+    if grep -qiE "organization has disabled|subscription access" ${ERRTXT[@]+"${ERRTXT[@]}"}; then
+      auth_state=org-blocked
+    else
+      auth_state=$(token_auth_state)
+    fi
+    if [ "$auth_state" = alive ]; then
+      AUTH_SIGNATURE_FALSE_POSITIVE=1
+      echo "subfleet claude: auth-failure signature on lane $EMAIL ('$auth_phrase') but the token still authenticates at the usage endpoint — not a dead token; treating as a transient failure (no re-enroll, no 30-day cooldown)." >&2
+    else
+      record_lane_run 5
+      echo "subfleet claude: AUTH FAILURE on lane $EMAIL ('$auth_phrase'; token probe: $auth_state) — the setup-token is dead or the org blocks Claude Code; retrying cannot help." >&2
+      echo "subfleet claude: re-enroll (Max-only): claude setup-token   # sign into $EMAIL" >&2
+      echo "subfleet claude:                      subfleet enroll $EMAIL" >&2
+      exit 5
+    fi
+  fi
+  # "You're out of usage credits. Switch to another model…" (2026-09-02, a lane
+  # whose Fable allotment was spent while Opus/Haiku still served): a hard,
+  # model-scoped limit — rotate or fail fast; never retry it as transient.
+  if grep -qiE "hit your limit|usage limit|session limit|weekly limit|5-hour limit|subscription limit|out of extra usage|out of usage credits" \
+      ${ERRTXT[@]+"${ERRTXT[@]}"}; then
+    record_lane_run 4
+    if [ "$AUTO" = 1 ] && [ $attempt -le $MAX_RETRIES ]; then
+      OLD_EMAIL=$EMAIL
+      exclude_lane "$OLD_EMAIL"
+      echo "subfleet claude: lane $OLD_EMAIL hit a hard limit; re-picking (attempt $attempt/$MAX_RETRIES)" >&2
+      if pick_lane_with_token; then
+        continue
+      fi
+      echo "subfleet claude: no alternate lane available" >&2
+    fi
+    echo "subfleet claude: LANE LIMITED (rc=$rc) — re-dispatch on another lane (subfleet claude -A) or wait for the reset (subfleet pick claude --model $MODEL --json --all)." >&2
+    exit 4
+  fi
+  if [ $attempt -le $MAX_RETRIES ] && { [ "$AUTH_SIGNATURE_FALSE_POSITIVE" = 1 ] || grep -qiE \
+      "rate limit|too many requests|429|overloaded|capacity|disconnect|connection|ECONN|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529" \
+      ${ERRTXT[@]+"${ERRTXT[@]}"}; }; then
+    # Raw child codes 4/5 are reserved for our text-classified hard-limit and
+    # auth outcomes. Never let an unrelated provider exit fabricate cooldowns.
+    accounting_rc=$rc
+    case "$accounting_rc" in 4|5) accounting_rc=1 ;; esac
+    record_lane_run "$accounting_rc"
+    wait_s=$((BACKOFF_BASE * attempt))
+    echo "subfleet claude: transient failure (rc=$rc), retry $attempt/$MAX_RETRIES in ${wait_s}s: $(grep -m1 -ioE 'rate limit|too many requests|429|overloaded|capacity|disconnect|connection[a-z ]*|ECONN[A-Z]*|ETIMEDOUT|timed? ?out|temporarily|internal server error|50[023]|529' ${ERRTXT[@]+"${ERRTXT[@]}"} | head -1)" >&2
+    sleep "$wait_s"
+    continue
+  fi
+  echo "subfleet claude: FAILED rc=$rc attempt=$attempt lane=$EMAIL (out_bytes=$(wc -c <"$OUT_FILE" | tr -d ' ')); stderr tail:" >&2
+  tail -3 "$ERR_FILE" >&2
+  [ -s "$RAW_FILE" ] && jq -r '.result // empty' "$RAW_FILE" 2>/dev/null | tail -2 >&2
+  [ "$rc" -eq 0 ] && rc=1  # rc=0 with a bad/empty envelope is still a failure
+  case "$rc" in 4|5) rc=1 ;; esac  # reserved unless classified above
+  record_lane_run "$rc"
+  exit "$rc"
+done

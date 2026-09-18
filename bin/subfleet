@@ -1,0 +1,18 @@
+#!/bin/bash
+# subfleet CLI launcher. Prefers the uv-managed venv (Python 3.14), falls back
+# to system python3 — the package is stdlib-only so both work. Deliberately
+# NO `cd`: the caller's cwd is the default workdir for `subfleet run` and
+# relative -p/-o paths must resolve where the caller stands.
+set -uo pipefail
+# carpool → subfleet rename (2026-08-23): honour legacy CARPOOL_* names for a while.
+for _legacy in $(env | sed -n 's/^\(CARPOOL_[A-Z0-9_]*\)=.*/\1/p') CLAUDE_LANE_CARPOOL DELEGATE_CARPOOL; do
+  _new=${_legacy/CARPOOL/SUBFLEET}
+  [ -n "${!_new:-}" ] || [ -z "${!_legacy:-}" ] || export "$_new=${!_legacy}"
+done
+unset _legacy _new
+ROOT="${SUBFLEET_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+# -P: never prepend the cwd to sys.path — running from a directory that holds
+# another `subfleet`/`carpool` package must not shadow this one.
+exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PY" -P -m subfleet.cli "$@"
