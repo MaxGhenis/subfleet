@@ -298,7 +298,113 @@ def test_opus_with_slack_dispatches_on_the_slack_lane(guarded, monkeypatch):
     assert delegate.main(["--task", "build", "--tier", "standard", "task", "-o", str(guarded / "o.md")]) == 0
     assert _cmds(calls) == [("claude-opus-5", "b@x")]
     record = json.loads((guarded / "decisions.jsonl").read_text().splitlines()[-1])
-    assert record["model"] == "opus" and record["reserve"] is None
+    assert record["model"] == "opus"
+    assert record["reserve"]["action"] == "dispatched"
+    assert [k["lane"] for k in record["reserve"]["kept"]] == ["b@x"]
+    assert [d["lane"] for d in record["reserve"]["drops"]] == ["a@x"]
+    assert "blocked_model" not in record["reserve"]
+
+
+LANE_ENTRY_KEYS = {"lane", "state", "slack", "shared", "fable", "status", "checked_at"}
+
+
+def _last_record(state):
+    return json.loads((state / "decisions.jsonl").read_text().splitlines()[-1])
+
+
+def test_dry_run_decision_record_lists_kept_and_dropped_lanes(guarded, monkeypatch, capsys):
+    """The 2026-09-18 15:44-16:00 shape: thirteen Opus dispatches landed on the
+    one slack lane while another lane was withheld as reserved, and every
+    record said ``reserve: null``. A dry run of that dispatch must record both
+    lanes, the policy, and the action -- and nothing that looks like a token."""
+    monkeypatch.setattr(delegate, "_capacity_report",
+                        lambda: capacity_snapshot(codex_rows=[], claude_rows=_lanes("a@x", "b@x")))
+    readings = _readings_fn({"a@x": ("reserved", "ok", -0.9), "b@x": ("slack", "ok", 0.12)})
+
+    def leaky_readings(emails, pol=None, now=None):
+        # A reading must never be copied wholesale into the record.
+        return {email: {**value, "accessToken": "sk-ant-never-logged"}
+                for email, value in readings(emails, pol=pol, now=now).items()}
+    monkeypatch.setattr(reserve, "readings", leaky_readings)
+    monkeypatch.setattr(reserve, "heal", lambda email, pol=None: False)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([], calls))
+    assert delegate.main([
+        "--dry-run", "--task", "research", "--tier", "standard", "task",
+        "-o", str(guarded / "o.md"),
+    ]) == 0
+    assert _cmds(calls) == []  # dry run: nothing launched
+    printed = capsys.readouterr().out
+    assert "-a b@x" in printed and "claude-opus-5" in printed
+    line = (guarded / "decisions.jsonl").read_text().splitlines()[-1]
+    assert "sk-ant-never-logged" not in line and "accessToken" not in line
+    record = json.loads(line)
+    assert record["model"] == "opus" and record["lane/home"] == "b@x"
+    note = record["reserve"]
+    assert note["policy"] == {"enabled": True, "cap_ratio": 2.0, "min_slack": 0.05}
+    assert note["action"] == "dispatched"
+    assert note["kept"] == [{
+        "lane": "b@x", "state": "slack", "slack": 0.12, "shared": 94.0, "fable": 49.0,
+        "status": "ok", "checked_at": "2026-09-08T16:40:00-04:00",
+    }]
+    assert note["drops"] == [{
+        "lane": "a@x", "state": "reserved", "slack": -0.9, "shared": 94.0, "fable": 49.0,
+        "status": "ok", "checked_at": "2026-09-08T16:40:00-04:00",
+    }]
+    for entry in (*note["kept"], *note["drops"]):
+        assert set(entry) == LANE_ENTRY_KEYS
+    assert "blocked_model" not in note
+
+
+def test_pinned_slack_lane_is_recorded_as_kept(guarded, monkeypatch):
+    monkeypatch.setattr(delegate, "_capacity_report",
+                        lambda: capacity_snapshot(codex_rows=[], claude_rows=_lanes("a@x", "b@x")))
+    _install_readings(monkeypatch, {"a@x": ("reserved", "ok", -0.96), "b@x": ("slack", "ok", 0.2)})
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "ok", "")], calls))
+    assert delegate.main(["-m", "opus", "-a", "b@x", "task", "-o", str(guarded / "o.md")]) == 0
+    assert _cmds(calls) == [("claude-opus-5", "b@x")]
+    note = _last_record(guarded)["reserve"]
+    assert note["action"] == "dispatched"
+    assert [k["lane"] for k in note["kept"]] == ["b@x"] and note["kept"][0]["state"] == "slack"
+    assert note["drops"] == []  # a pin never consults the other lanes
+
+
+def test_disabled_policy_records_the_lanes_it_let_through_unread(guarded, monkeypatch):
+    paths.reserve_policy_path().write_text(json.dumps({"enabled": False}))
+    monkeypatch.setattr(delegate, "_capacity_report",
+                        lambda: capacity_snapshot(codex_rows=[], claude_rows=_lanes("a@x", "b@x")))
+    monkeypatch.setattr(reserve, "readings", lambda *a, **k: pytest.fail("disabled policy must not read"))
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "ok", "")], calls))
+    assert delegate.main(["-m", "opus", "task", "-o", str(guarded / "o.md")]) == 0
+    note = _last_record(guarded)["reserve"]
+    assert note["policy"]["enabled"] is False
+    assert note["action"] == "dispatched" and note["drops"] == []
+    assert [k["lane"] for k in note["kept"]] == ["a@x", "b@x"]
+    assert all(k["state"] is None and k["slack"] is None for k in note["kept"])
+
+
+def test_no_dispatchable_lane_still_records_the_reserve_view(guarded, monkeypatch):
+    limited = [capacity_row("claude", "a@x", score=0, dispatchable=False)]
+    monkeypatch.setattr(delegate, "_capacity_report",
+                        lambda: capacity_snapshot(codex_rows=[], claude_rows=limited))
+    monkeypatch.setattr(reserve, "heal", lambda email, pol=None: False)
+    seen = []
+
+    def readings(emails, pol=None, now=None):
+        seen.append(list(emails))
+        return _readings_fn({})(emails, pol=pol, now=now)
+    monkeypatch.setattr(reserve, "readings", readings)
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([], calls))
+    assert delegate.main(["-m", "opus", "task", "-o", str(guarded / "o.md")]) == 3
+    assert seen == [[]]  # no candidate reached the reserve
+    note = _last_record(guarded)["reserve"]
+    assert note == {
+        "policy": {"enabled": True, "cap_ratio": 2.0, "min_slack": 0.05},
+        "kept": [], "drops": [], "action": "no lane",
+    }
 
 
 def test_opus_blocked_everywhere_upgrades_to_fable_when_codex_is_closed(guarded, monkeypatch, capsys):
@@ -316,6 +422,8 @@ def test_opus_blocked_everywhere_upgrades_to_fable_when_codex_is_closed(guarded,
     assert record["reserve"]["blocked_model"] == "claude-opus-5"
     assert record["reserve"]["action"] == "upgraded to fable"
     assert [d["lane"] for d in record["reserve"]["drops"]] == ["a@x", "b@x"]
+    assert record["reserve"]["kept"] == []
+    assert {"cap_ratio", "min_slack"} <= set(record["reserve"]["policy"])
     assert record["routing_history"][-1]["to"] == "fable"
 
 
@@ -398,6 +506,14 @@ def test_rc4_retry_does_not_fall_onto_a_reserved_lane(guarded, monkeypatch):
     # for Opus -- with a@x cooled and b@x reserved the work moves up to Fable.
     assert _cmds(calls) == [("claude-opus-5", "a@x"), ("claude-fable-5-1", "a@x")] or \
         _cmds(calls) == [("claude-opus-5", "a@x"), ("claude-fable-5-1", "b@x")]
+    records = [json.loads(line) for line in (guarded / "decisions.jsonl").read_text().splitlines()]
+    first, last = records[0], records[-1]
+    assert first["model"] == "opus" and first["result"] == 4
+    assert first["reserve"]["action"] == "dispatched"
+    assert [k["lane"] for k in first["reserve"]["kept"]] == ["a@x"]
+    assert [d["lane"] for d in first["reserve"]["drops"]] == ["b@x"]
+    assert last["model"] == "fable" and last["reserve"]["action"] == "upgraded to fable"
+    assert last["reserve"]["kept"] == [] and [d["lane"] for d in last["reserve"]["drops"]] == ["b@x"]
 
 
 # --- CLI table ---------------------------------------------------------------------
