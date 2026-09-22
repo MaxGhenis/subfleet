@@ -31,6 +31,9 @@ report the result.
 
 ## 2. Automate run-ledger reaping and fix `wait`/`kill` exits (hours)
 
+**Status 2026-09-22: superseded by the v2 cutover.** The brief below is the
+2026-09-17 record; the resolution and the one remaining v1 caller follow it.
+
 Verified defects (comparison doc, "Defects and drift" item 3):
 
 1. `run_ledger.reap_orphans` (around `subfleet/run_ledger.py:849-875`) has one
@@ -61,6 +64,70 @@ only. Add or extend tests in `tests/test_wait_kill.py` and
 update the README's run-ledger section. Do not run `subfleet runs reap`
 against the live ledger without `--dry-run` until the tests pass; show the
 dry-run output before the real pass.
+
+### Resolution (2026-09-22)
+
+The `subfleet` on PATH has been v2 since 2026-09-19
+(`~/.subfleet/cutovers/20260919T135742Z/CUTOVER.md`): `subfleet 2.0.0a0`,
+daemon `subfleetd`, store under `~/.subfleet`, installed from
+`~/.local/share/subfleet/current` (source github.com/MaxGhenis/subfleet-v2).
+Checked against that installed code, each item above already has a v2
+counterpart:
+
+| v1 defect | v2 |
+|---|---|
+| (a) nothing reaps automatically | the daemon tick checks guardian liveness per attempt (`daemon.py`, `procs.liveness`); a dead guardian with no receipt is contained and finalized `lost`. `runs reap` reports; "the daemon owns finalization" (`cli.py`, `cmd_runs_reap`). |
+| (b) a reaped run sends no notice | `_lost → _finalize(lost=True) → _notice`; `_unlaunched` emits one too. |
+| (c) pid-less rows RUNNING forever | `starting` with no `start.json` after `start_grace_s` → `_unlaunched("starting-no-receipt")`, failed or retried, with a notice; `reserved` with no pending launch → `_unlaunched("reserved-no-launch")`. The nine v1 rows were finalized rc −9 at the cutover (`orphan-reconciliation.json`, "predates current boot"). |
+| (d) `wait` exits 0 on rc −9 | `exit_for_job`: `lost` → 125; a provider rc outside the table → 1 with the raw rc in the message (C-17.3). |
+| (e) `kill --grace 0` sends SIGKILL at once | `--grace` is dropped by the compat layer with a note; containment owns the TERM→KILL escalation (C-5). |
+
+The hook point named in (a), the v1 `subfleet revive` launchd pass, is
+unloaded with the other four v1 services (CUTOVER.md).
+
+**What is still true.** v1's `consensus.py` gate has one live caller: a
+long-running Codex session that drives a private study runs
+`<its-worktree>/subfleet/bin/subfleet gate plan <dossier> --peer fable
+--peer-account <email> --peer-native-login-dir ~/.subfleet/logins/<email>
+--main-approve --expect-sha256 <sha>` by path, a v1 variant (branch
+`native-claude-gate-20260910`, off `c769b39b`) that pins the Fable peer to a
+native login directory. Its peer rounds are the only writes to this ledger
+since the cutover (`~/chief-of-staff/state/subfleet/runs`; 26 rows,
+2026-09-19 to 09-21), nothing reaps that ledger now, and v2's `lanes
+transfer` refuses a lane while an unfinished v1 row names it
+(`lanes_transfer.py`: "v1 must finish or reap the row first"). Zero
+unfinished rows on 2026-09-22; if one appears, `~/subfleet/bin/subfleet runs
+reap` (v1, by path) still finalizes it.
+
+**Moving that caller.** v2 already does what the variant was built for: v2
+Claude lanes run on `~/.subfleet/logins/<email>` as `CLAUDE_CONFIG_DIR`
+(`credentials.py`), and `--peer-account <email>` pins the round to that lane.
+The equivalent command is
+
+```bash
+subfleet gate plan <dossier> --peer fable --peer-account <email> --main-approve --expect-sha256 <sha256>
+```
+
+Probe gates on 2026-09-22 (`~/.subfleet/gates/20260922-144449-plan-83506e7d`,
+`…-144654-plan-e46e61ef`, a 698-byte plan): the peer job ran on lane `claude-1`
+(the pinned account, claude-fable-5-1) and `runs show` records the attempt, lane,
+and deliverable. The first round was rejected for prose before the sentinel by
+the same `before.strip() or after.strip()` check v1 has (`gate/verdict.py` =
+`consensus.py`); the study's real Fable rounds all began with the sentinel
+(14 of 15 v1 rounds since 2026-09-19 parsed). A second probe with the normal
+round budget (`--max-rounds 3`) was submitted at 14:46:54Z and was still queued behind the daemon's four-attempt cap when
+this note was committed; its outcome is the durable record at
+`~/.subfleet/gates/20260922-144654-plan-e46e61ef/gate.json`.
+
+What changes for the study if it switches: gate records move from
+`~/chief-of-staff/state/subfleet/gates/<id>/` to `~/.subfleet/gates/<id>/`
+with the same layout and the same `certificate.json` keys; exit codes keep
+the v1 table; `--max-rounds 0` means the policy cap (`caps.gate_max_rounds`,
+4 in `~/.subfleet/policy.json`) rather than v1's unlimited, and one study
+gate ran five rounds (`20260919-093330-plan-bda0a327`), so raise the cap
+first; and the caller pins its v1 worktree, byte for byte, as a trusted input of
+the study it drives, so the switch is a design amendment for that session to
+record. Nothing under that worktree or the study was edited for this note.
 
 ## 3. Build and test a saved dispatcher workflow (hours)
 
