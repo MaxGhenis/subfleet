@@ -413,7 +413,7 @@ def test_same_second_reenrollment_clear_supersedes_auth_failure(
 ):
     _configure_lanes(tmp_path, monkeypatch, {EMAIL: SECRET})
     stamp = (NOW - timedelta(hours=6)).isoformat(timespec="seconds")
-    paths.keepalive_state_path().parent.mkdir(parents=True)
+    paths.keepalive_state_path().parent.mkdir(parents=True, exist_ok=True)
     paths.keepalive_state_path().write_text(
         json.dumps(
             {
@@ -487,6 +487,11 @@ def test_dry_run_has_no_subprocess_or_filesystem_side_effects(
 ):
     _configure_lanes(tmp_path, monkeypatch, {EMAIL: SECRET})
 
+    def state_listing():
+        root = paths.state_dir()
+        return sorted(str(p) for p in root.rglob("*")) if root.exists() else []
+
+    before = state_listing()
     report = keepalive.run(
         now=NOW,
         dry_run=True,
@@ -511,7 +516,7 @@ def test_dry_run_has_no_subprocess_or_filesystem_side_effects(
     assert not paths.keepalive_state_path().with_suffix(".json.lock").exists()
     assert not paths.lane_usage_path().exists()
     assert not paths.runs_dir().exists()
-    assert not paths.state_dir().exists()
+    assert state_listing() == before
 
 
 def test_cli_accepts_family_and_dry_run_and_prints_one_summary(
