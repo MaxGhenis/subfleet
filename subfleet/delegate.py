@@ -604,16 +604,53 @@ def _capacity_candidates(data: dict[str, Any], family: str,
     return rows
 
 
-def _reserve_filter(rows: list[dict[str, Any]], model: str
+def _reserve_filter(rows: list[dict[str, Any]], model: str,
+                    pol: dict[str, Any] | None = None,
                     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Fable reserve seam: lanes a non-Fable Claude model may use, and why not.
 
     Opus/Sonnet/Haiku draw the shared weekly window that Fable also needs, so
     a lane whose shared headroom would not cover its remaining Fable share is
     withheld (Max, 2026-09-06; see ``reserve``). Fable and a disabled policy
-    pass every row through.
+    pass every row through. Each kept row comes back annotated with the
+    reading that kept it (``row["reserve"]``); each drop names its lane, state
+    and reading.
     """
-    return reserve.filter_lanes(rows, model=MODEL_NAMES[model])
+    return reserve.filter_lanes(rows, model=MODEL_NAMES[model], pol=pol)
+
+
+RESERVE_LANE_KEYS = ("state", "slack", "shared", "fable", "status", "checked_at")
+
+
+def _reserve_record(kept: list[dict[str, Any]], drops: list[dict[str, Any]],
+                    pol: dict[str, Any]) -> dict[str, Any]:
+    """The ``reserve`` entry of a decision record for one non-Fable Claude attempt.
+
+    Every attempt records what the reserve saw, not only the attempts it
+    blocked: the policy in force, each lane the filter kept (with the reading
+    that kept it), each lane it dropped, and -- set by the caller once known --
+    what happened next (``dispatched``, ``upgraded to <model>``, ``no lane``,
+    ``attempt cap``). Until 2026-09-18 an ordinary Opus dispatch logged
+    ``reserve: null`` even when the filter had withheld lanes, so the log could
+    not show why one lane was chosen over another. Lane entries carry
+    percentages, states and timestamps only (``RESERVE_LANE_KEYS``); no token
+    value ever reaches a decision record.
+    """
+    return {
+        "policy": {key: pol[key] for key in ("enabled", "cap_ratio", "min_slack")},
+        "kept": [
+            {
+                "lane": str(row.get("email") or row.get("id") or ""),
+                **{key: (row.get("reserve") or {}).get(key) for key in RESERVE_LANE_KEYS},
+            }
+            for row in kept
+        ],
+        "drops": [
+            {"lane": drop.get("lane"), **{key: drop.get(key) for key in RESERVE_LANE_KEYS}}
+            for drop in drops
+        ],
+        "action": None,
+    }
 
 
 def _scoped_limit_reasoning(data: dict[str, Any], model_family: str) -> dict[str, Any]:
@@ -1261,16 +1298,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 capacity_data, "claude", tried_for_model, model_family=model_family
             )
             reserve_drops: list[dict[str, Any]] = []
+            reserve_kept: list[dict[str, Any]] = []
             reserve_blocked = False
             if model != "fable":
+                reserve_policy = reserve.policy()
                 if args.a:
-                    kept, reserve_drops = _reserve_filter(
-                        [{"email": args.a, "id": args.a}], model
+                    reserve_kept, reserve_drops = _reserve_filter(
+                        [{"email": args.a, "id": args.a}], model, reserve_policy
                     )
-                    reserve_blocked = not kept
+                    reserve_blocked = not reserve_kept
                 else:
-                    candidates, reserve_drops = _reserve_filter(candidates, model)
+                    candidates, reserve_drops = _reserve_filter(
+                        candidates, model, reserve_policy
+                    )
+                    reserve_kept = candidates
                     reserve_blocked = bool(reserve_drops) and not candidates
+                # Recorded whether or not the reserve blocks this attempt: the
+                # kept lanes with their readings sit beside the drops, so the
+                # decision log shows why this lane and not another.
+                reserve_note = _reserve_record(reserve_kept, reserve_drops, reserve_policy)
             if reserve_blocked:
                 # Every lane this model could use still has Fable to protect:
                 # move the work upward (Astra when the Codex fleet has room and
@@ -1280,13 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 upward = next_semantic_route() if not args.a else None
                 codex_open = bool(_capacity_candidates(capacity_data, "codex"))
                 reason = f"Fable reserve: {reserve.describe(reserve_drops)}"
-                reserve_note = {
-                    "policy": {
-                        key: reserve.policy()[key] for key in ("cap_ratio", "min_slack")
-                    },
-                    "blocked_model": MODEL_NAMES[previous_model],
-                    "drops": reserve_drops,
-                }
+                reserve_note["blocked_model"] = MODEL_NAMES[previous_model]
                 if (
                     upward is not None
                     and MODEL_FAMILY[upward[0]] == "codex"
@@ -1312,6 +1352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 str(candidates[0].get("email") or candidates[0]["id"]) if candidates else None
             )
             if not lane_or_home or attempts >= 3:
+                if model != "fable":
+                    reserve_note["action"] = "no lane" if not lane_or_home else "attempt cap"
                 if not lane_or_home and not args.a:
                     scoped_reset = _earliest_scoped_reset(scoped_reasoning or {})
                     print(
@@ -1326,6 +1368,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = 3
             else:
                 tried.add((lane_or_home, full_model)); attempts += 1
+                if model != "fable":
+                    reserve_note["action"] = "dispatched"
 
                 def build_claude_cmd(out_path: str, *, lane: str = lane_or_home,
                                      detached: bool = (mode == "detached")) -> list[str]:

@@ -559,8 +559,18 @@ Fable window (a Team seat) has nothing to protect and is open. When every
 eligible lane is reserved the work moves **upward**, never down: to Astra when
 the task/tier chain allows it and a Codex home has room, otherwise to Fable on
 those same lanes (an explicit `-m opus -a <lane>` on a reserved lane runs Fable
-on that lane and says so). The decision record carries `reserve` (policy,
-blocked model, per-lane drops, action); stderr prints `FABLE RESERVE: …`.
+on that lane and says so). Every non-Fable Claude attempt writes `reserve`
+into its decision record (`decisions.jsonl`, `--why`, the run's
+`routing_decision`): the policy in force (`enabled`, `cap_ratio`, `min_slack`),
+`kept` — each lane the filter let through, with the reading that let it
+(`state`, `slack`, `shared`, `fable`, `status`, `checked_at`) — `drops` in the
+same per-lane shape, and `action` (`dispatched`, `upgraded to fable`,
+`upgraded to astra`, `no lane`, `attempt cap`). A blocked attempt also names
+`blocked_model`. Before 2026-09-18 only blocked attempts carried `reserve`, so
+an ordinary Opus dispatch that had skipped a reserved lane logged
+`reserve: null` and the log could not show why one lane was chosen over
+another. Lane entries hold percentages, states and timestamps only, never a
+token. stderr prints `FABLE RESERVE: …` when an attempt is blocked.
 
 Readings come from the subfleet-v2 login dirs (`~/.subfleet/logins/<email>/`,
 full-scope `claude auth login` per account): their OAuth access tokens can read
