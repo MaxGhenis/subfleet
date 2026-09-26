@@ -594,7 +594,7 @@ def test_codex_usage_limit_records_fifteen_minute_home_cooldown(tmp_path):
         timeout=10,
     )
 
-    assert completed.returncode == 9
+    assert completed.returncode == 4
     cooldowns = json.loads((delegate_state / "cooldowns.json").read_text())
     until = datetime.fromisoformat(cooldowns[str(home)]["*"])
     assert timedelta(minutes=14) < until - started < timedelta(minutes=16)

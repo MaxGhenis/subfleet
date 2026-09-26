@@ -432,13 +432,15 @@ def test_semantic_runtime_limits_promote_to_next_model(
         lambda: capacity_snapshot(claude_rows=lanes),
     )
     calls = []
-    monkeypatch.setattr(
-        delegate.subprocess,
-        "run",
-        fake_run_factory(
-            [(4, "", "usage limit")] * 3 + [(0, "", "")] * 3, calls
-        ),
-    )
+    runner = fake_run_factory([(4, "", "usage limit")] * 3 + [(0, "", "")], calls)
+    def run(cmd, **kwargs):
+        result = runner(cmd, **kwargs)
+        if "-H" in cmd:
+            delegate.capacity.store_lane_cooldown(
+                cmd[cmd.index("-H") + 1], delegate._now() + timedelta(minutes=15)
+            )
+        return result
+    monkeypatch.setattr(delegate.subprocess, "run", run)
 
     assert delegate.main([
         "--task", "lookup", "--tier", "trivial", "find x",
@@ -448,14 +450,12 @@ def test_semantic_runtime_limits_promote_to_next_model(
     models = [cmd[cmd.index("-m") + 1] for cmd in calls]
     # trivial starts on Luna (the snapshot's one Codex home); a runtime usage
     # limit there promotes upward to Opus on the Claude lanes.
-    assert models[0] == delegate.MODEL_NAMES["luna"]
-    assert models[1:] and all(m == delegate.MODEL_NAMES["opus"] for m in models[1:])
+    assert models == [delegate.MODEL_NAMES["luna"]] + [delegate.MODEL_NAMES["opus"]] * 3
     decisions = [
         json.loads(line)
         for line in (isolated / "decisions.jsonl").read_text().splitlines()
     ]
-    assert [decision["result"] for decision in decisions][-1] == 0
-    assert all(decision["result"] == 4 for decision in decisions[:-1])
+    assert [decision["result"] for decision in decisions] == [4, 4, 4, 0]
     assert decisions[-1]["requested_model"] == "luna"
     assert decisions[-1]["model"] == "opus"
     assert decisions[-1]["routing_capacity_states"]["luna"] is False
@@ -1386,14 +1386,37 @@ def test_opus_requests_drain_fable_stranded_lanes_first():
 
 
 # ---------------------------------------------------------------------------
-# 2026-09-03: blind lanes (no usage reading) must be probed before dispatch,
-# and a lane that stays blind may not stack runs. Five Opus lanes died mid-run
-# that day because the picker treated "score None" as dispatchable.
+# Probe unknown quota readings before dispatch, while distinguishing missing
+# telemetry from confirmed exhaustion. Concurrency orders eligible lanes;
+# it must not make the whole fleet unavailable when quota probes fail.
 
 
 def _blind(email, in_flight=0):
     return capacity_row("claude", email, score=None, confidence="estimated",
                         in_flight=in_flight)
+
+
+@pytest.mark.parametrize("probe_score", [None, 40.0, 0.0])
+def test_historical_zero_headroom_does_not_prevent_actual_probe(monkeypatch, probe_score):
+    lane = capacity_row("claude", "estimated@x", score=0, confidence="estimated")
+    lane["measured_headroom_score"] = None
+    probed, cooled = [], []
+    monkeypatch.setattr(delegate.capacity, "lane_cooldown", lambda *a, **k: None)
+    monkeypatch.setattr(delegate, "_probe_lane_headroom", lambda email: (
+        probed.append(email) or {"score": probe_score, "reset_at": None,
+                                 "status": "ok" if probe_score is not None else "http-429"}
+    ))
+    monkeypatch.setattr(delegate.capacity, "store_lane_cooldown",
+                        lambda *a, **k: cooled.append((a, k)))
+    rows = delegate._capacity_candidates(
+        {"accounts": [lane]}, "claude", model_family="Fable")
+    assert probed == ["estimated@x"]
+    if probe_score == 0:
+        assert not rows and len(cooled) == 1
+    else:
+        assert len(rows) == 1 and not cooled
+        assert delegate.capacity.dispatchable_for(rows[0], "Fable")
+        assert rows[0]["measured_headroom_score"] == probe_score
 
 
 def test_blind_lane_measured_over_floor_is_kept_and_ranked_first(monkeypatch):
@@ -1437,6 +1460,25 @@ def test_run_exclude_flag_parses_and_removes_accounts_from_the_pick(monkeypatch)
     assert [r["id"] for r in picked] == ["c@x"]
 
 
+@pytest.mark.parametrize("detached", [False, True])
+def test_exclusions_reach_provider_runner_for_every_launch_mode(
+    isolated, tmp_path, monkeypatch, detached
+):
+    # Dry-run normally forces sync; exercise both command construction paths
+    # without launching a provider process.
+    monkeypatch.setattr(delegate, "launch_mode",
+                        lambda args: ("detached" if detached else "sync", "test"))
+    assert delegate.main([
+        "-m", "fable", "-t", "review", "-C", str(tmp_path), "--dry-run",
+        "--exclude", "a@x", "--exclude", "b@x", "review the artifact",
+    ]) == 0
+    decision = json.loads((isolated / "decisions.jsonl").read_text())
+    command = decision["cmd"]
+    assert command[command.index("-a") + 1] not in {"a@x", "b@x"}
+    assert [command[i + 1] for i, value in enumerate(command) if value == "-x"] == ["a@x", "b@x"]
+    assert ("-A" in command) is detached
+
+
 def test_active_desktop_login_ranks_last_among_dispatchable_lanes(monkeypatch):
     """2026-09-04: with every lane token blind, the desktop login was the only
     MEASURED lane and therefore ranked "best" despite the handicap — the one
@@ -1457,15 +1499,28 @@ def test_active_desktop_login_ranks_last_among_dispatchable_lanes(monkeypatch):
     assert [r["id"] for r in alone] == ["login@x"]
 
 
-def test_lane_that_stays_blind_may_not_stack_runs(monkeypatch):
+def test_unknown_quota_lanes_remain_eligible_and_prefer_lower_concurrency(monkeypatch):
     monkeypatch.setattr(delegate, "_probe_lane_headroom",
-                        lambda email: {"score": None, "reset_at": None, "status": "token-invalid"})
+                        lambda email: {"score": None, "reset_at": None, "status": "http-403"})
+    monkeypatch.setattr(delegate.capacity, "store_lane_cooldown",
+                        lambda *a, **k: pytest.fail("unknown quota must not create a cooldown"))
     idle = _blind("idle@x", in_flight=0)
     busy = _blind("busy@x", in_flight=1)
     rows = delegate._capacity_candidates(
         {"accounts": [busy, idle]}, "claude", model_family="Opus")
-    assert [r["id"] for r in rows] == ["idle@x"]
-    assert rows[0]["jit_probe"] == "token-invalid"
+    assert [r["id"] for r in rows] == ["idle@x", "busy@x"]
+    assert all(r["jit_probe"] == "http-403" for r in rows)
+    assert all(r["headroom_score"] is None for r in rows)
+
+
+def test_fable_remains_dispatchable_when_all_unknown_quota_lanes_are_busy(monkeypatch):
+    monkeypatch.setattr(delegate, "_probe_lane_headroom",
+                        lambda email: {"score": None, "reset_at": None, "status": "http-403"})
+    rows = delegate._capacity_candidates(
+        {"accounts": [_blind("busy@x", in_flight=2), _blind("less-busy@x", in_flight=1),
+                      _blind("excluded@x", in_flight=0)]},
+        "claude", {"excluded@x"}, model_family="Fable")
+    assert [r["id"] for r in rows] == ["less-busy@x", "busy@x"]
 
 
 def test_measured_lanes_are_not_probed(monkeypatch):
@@ -1621,20 +1676,17 @@ def test_run_refuses_an_output_path_a_live_run_is_still_writing(monkeypatch, cap
     assert delegate._output_path_guard(None) is None
 
 
-def test_blind_busy_lanes_are_inconclusive_not_a_model_limit(monkeypatch):
-    """2026-09-05 13:2x: every Opus-eligible lane was blind (usage endpoint
-    rate-limited) and carried one in-flight run, the blind filter withheld all
-    of them, and _model_capacity_state read the empty list as a model-scoped
-    Opus limit, escalating two standard dispatches to Astra. Withheld-but-
-    eligible lanes are inconclusive telemetry, not exhaustion."""
+def test_busy_lanes_with_missing_telemetry_do_not_promote_opus_to_astra(monkeypatch):
+    """Quota endpoint throttling and an existing job do not imply exhausted
+    inference capacity or justify promoting standard work to another model."""
     monkeypatch.setattr(delegate, "_probe_lane_headroom",
                         lambda email: {"score": None, "reset_at": None, "status": "rate-limited"})
     busy = [_blind(f"busy{i}@x", in_flight=1) for i in range(3)]
     data = {"accounts": busy}
-    assert delegate._capacity_candidates(data, "claude", model_family="Opus") == []
-    assert delegate._model_capacity_state(data, "opus") is None
+    assert len(delegate._capacity_candidates(data, "claude", model_family="Opus")) == 3
+    assert delegate._model_capacity_state(data, "opus") is True
     model, states = delegate.select_semantic_model(data, ["opus", "astra"])
-    assert model == "opus" and states["opus"] is None
+    assert model == "opus" and states["opus"] is True
 
 
 def test_scoped_limit_on_every_lane_is_still_a_model_limit(monkeypatch):
@@ -1682,7 +1734,7 @@ def test_luna_tiers_ignore_claude_scoped_limits(isolated, monkeypatch, capsys, t
         "-o", str(isolated / f"luna-{tier}.md"),
     ]) == 0
     assert calls[0][calls[0].index("-m") + 1] == "gpt-5.6-luna"
-    assert "-e" not in calls[0]  # catalog default effort, not ultra
+    assert calls[0][calls[0].index("-e") + 1] == ("low" if tier == "trivial" else "medium")
     decision = json.loads((isolated / "decisions.jsonl").read_text().splitlines()[-1])
     assert decision["requested_model"] == "luna" and decision["model"] == "luna"
     assert "CAPABILITY FALLBACK" not in capsys.readouterr().err

@@ -1,6 +1,6 @@
 """Human rendering: terminal table, morning-brief markdown section."""
 
-from . import capacity_expiry
+from . import capacity_expiry, desktop_app
 from .claude import LIVE_STALE_AFTER_MIN
 from .snapshot import has_applicable_reset_credit, limited_reset_credit_homes
 from .util import fmt_clock, now_local, parse_iso
@@ -122,6 +122,9 @@ def table(snap: dict) -> str:
     expiry = _codex_expiry(snap, now)
     expiry_lanes = expiry.get("lanes") or {}
     lines = [f"AI quota — {now.strftime('%Y-%m-%d %-I:%M%p %Z').lower()}", ""]
+    staged_line = desktop_app.warning_line(snap.get("desktop_app"), now)
+    if staged_line:
+        lines += [staged_line, ""]
     lines.append("CODEX (ChatGPT accounts, one per CODEX_HOME)")
     header = (f"  {'home':<11} {'account':<26} {'5h':>5} {'resets':<14}"
               f" {'week':>5} {'resets':<14} {'burn %/h 6/24':>15}  status")

@@ -25,7 +25,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-from . import capacity, capacity_expiry, codex, paths, render, reset_policy, snapshot
+from . import capacity, capacity_expiry, codex, liveness, paths, render, reset_policy, snapshot
 from .util import atomic_write_json, fmt_clock, iso, load_json, now_local, parse_iso
 
 REALERT_HOURS = 6
@@ -741,6 +741,15 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None,
     if not dry_run:
         atomic_write_json(paths.alerts_path(), alerts_state)
 
+    # Sessions with no live process and pending work: the relay to Max that
+    # does not run through a session (liveness.py). Its own state file; a
+    # failure there must never cost the quota alerts above.
+    try:
+        liveness_summary = liveness.run(dry_run=dry_run, now=now)
+    except Exception as exc:
+        print(f"subfleet: liveness check failed: {exc}", file=sys.stderr)
+        liveness_summary = {"error": str(exc), "alerts_sent": [], "recovered": []}
+
     return {
         "generated_at": snap["generated_at"],
         "conditions": [c["key"] for c in conditions],
@@ -750,4 +759,5 @@ def run(dry_run: bool = False, live: bool = True, snap: dict | None = None,
         "healed": [ev["home"] for ev in heal_events if ev["result"] == "healed"],
         "reset_policy": policy_result,
         "reset_redemption": redemption,
+        "liveness": liveness_summary,
     }

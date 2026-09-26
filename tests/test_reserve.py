@@ -354,7 +354,7 @@ def test_explicit_opus_without_pin_skips_reserved_lanes(guarded, monkeypatch):
     assert _cmds(calls) == [("claude-opus-5", "b@x")]
 
 
-def test_sonnet_and_haiku_tiers_are_guarded_too(guarded, monkeypatch):
+def test_luna_tiers_promote_through_reserved_opus_to_fable(guarded, monkeypatch):
     monkeypatch.setattr(delegate, "_capacity_report",
                         lambda: capacity_snapshot(codex_rows=[], claude_rows=_lanes("a@x")))
     _install_readings(monkeypatch, {"a@x": ("reserved", "ok", -1.0)})
@@ -363,6 +363,17 @@ def test_sonnet_and_haiku_tiers_are_guarded_too(guarded, monkeypatch):
         monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "ok", "")], calls))
         assert delegate.main(["--task", "lookup", "--tier", tier, "task", "-o", str(guarded / f"{tier}.md")]) == 0
         assert _cmds(calls) == [("claude-fable-5-1", "a@x")]
+
+
+@pytest.mark.parametrize("model", ["sonnet", "haiku"])
+def test_explicit_sonnet_and_haiku_remain_guarded(guarded, monkeypatch, model):
+    monkeypatch.setattr(delegate, "_capacity_report",
+                        lambda: capacity_snapshot(codex_rows=[], claude_rows=_lanes("a@x")))
+    _install_readings(monkeypatch, {"a@x": ("reserved", "ok", -1.0)})
+    calls = []
+    monkeypatch.setattr(delegate.subprocess, "run", fake_run_factory([(0, "ok", "")], calls))
+    assert delegate.main(["-m", model, "task", "-o", str(guarded / f"{model}.md")]) == 0
+    assert _cmds(calls) == [("claude-fable-5-1", "a@x")]
 
 
 def test_fable_dispatch_never_consults_the_reserve(guarded, monkeypatch):

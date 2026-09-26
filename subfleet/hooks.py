@@ -5,8 +5,11 @@ Three entries in ``~/.claude/settings.json``, all routed through
 
 * ``SessionStart`` / ``UserPromptSubmit`` → completion catch-up: a detached
   run that finished while its session was not running parked a notice
-  (notify.py); the hook hands it to the session as additional context the
-  next time the session starts or the user prompts.
+  (notify.py), and a run whose completion push the inbox accepted but the
+  session's transcript never showed (a desktop-app seat idling toward its
+  pause drops them, measured 2026-09-06 21:40) is just as unseen; the hook
+  hands both to the session as additional context the next time the
+  session starts or the user prompts (notify.notices_for_hook).
 * ``PreToolUse`` (Bash) → the attached-runner guard: ``subfleet codex``,
   ``subfleet claude``, bare ``codex exec`` and the deprecated ``codex-run`` /
   ``claude-lane`` launched straight from a session die with that session

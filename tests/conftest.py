@@ -29,11 +29,26 @@ def isolated_state(tmp_path, monkeypatch):
         "SUBFLEET_RUN_DETACH", "SUBFLEET_RUN_ID", "SUBFLEET_RUN_CALLER_JSON",
         "SUBFLEET_RUN_LANE_LOG", "SUBFLEET_NOTIFY_MODE", "SUBFLEET_CLAUDE_SETTINGS",
         "SUBFLEET_CODEX_DETACHED", "SUBFLEET_REVIVE", "SUBFLEET_REVIVE_MODELS",
-        "SUBFLEET_SESSION_STORE",
+        "SUBFLEET_SESSION_STORE", "SUBFLEET_REVIVE_HOST", "SUBFLEET_LIVENESS_GRACE_MIN",
+        "SUBFLEET_LIVENESS_MAX_AGE_H", "SUBFLEET_NOTICE_FOLLOWUP_S",
+        "SUBFLEET_NOTICE_FOLLOWUP_MAX_AGE_H",
     ):
         monkeypatch.delenv(name, raising=False)
+    # A finished run's notice would spawn a detached follow-up worker (a real
+    # `subfleet _notice-followup` process sleeping five minutes); tests that
+    # exercise the spawn turn it on and fake Popen.
+    monkeypatch.setenv("SUBFLEET_NOTICE_FOLLOWUP", "off")
     # Never read the real session registry / transcripts from a test.
     monkeypatch.setenv("SUBFLEET_CLAUDE_DIR", str(tmp_path / "dot-claude"))
+    # Never touch the real tmux server, Telegram CLI, or desktop-app log/plist:
+    # each points at a path that does not exist unless a test writes one.
+    monkeypatch.setenv("SUBFLEET_TMUX", str(tmp_path / "no-tmux"))
+    monkeypatch.delenv("SUBFLEET_TMUX_SOCKET", raising=False)
+    # The desktop app's session store holds ~150k files; never read the real one.
+    monkeypatch.setenv("SUBFLEET_SESSION_STORE", str(tmp_path / "no-session-store"))
+    monkeypatch.setenv("SUBFLEET_TG", str(tmp_path / "no-tg"))
+    monkeypatch.setenv("SUBFLEET_DESKTOP_MAIN_LOG", str(tmp_path / "no-main.log"))
+    monkeypatch.setenv("SUBFLEET_DESKTOP_PLIST", str(tmp_path / "no-Info.plist"))
     # The Fable reserve reads the v2 login dirs and their keychain items; tests
     # never touch the real ones. Existing dispatch tests predate the reserve
     # and exercise the picker without it; reserve tests enable it explicitly.

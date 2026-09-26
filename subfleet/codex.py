@@ -44,6 +44,13 @@ WHAM_RESET_CREDITS_URL = (
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 )
 WHAM_RESET_CREDITS_CONSUME_URL = f"{WHAM_RESET_CREDITS_URL}/consume"
+# Local operational hold requested by Max on 2026-09-07.  Existence blocks
+# manual and automatic redemption, regardless of account-config overrides.
+# The deadline in this marker is context only: only explicit removal lifts it.
+RESET_INHIBIT_PATH = Path(
+    os.environ.get("SUBFLEET_RESET_INHIBIT")
+    or Path.home() / "capacity-sprint-20260907" / "no-reset.json"
+)
 USER_AGENT = "subfleet/0.1 (codex_cli_rs compatible)"
 
 USAGE_LIMIT_RE = re.compile(
@@ -410,6 +417,16 @@ def consume_reset_credit(
     payload = {"redeem_request_id": redeem_request_id}
     if credit_id is not None:
         payload["credit_id"] = credit_id
+    # Check at the irreversible boundary, rather than only in auto policy.
+    # lexists also fails closed for a dangling marker symlink.
+    if os.path.lexists(RESET_INHIBIT_PATH):
+        return {
+            "status": "blocked",
+            "code": "reset_inhibited",
+            "windows_reset": 0,
+            "error": f"Reset redemption is disabled by {RESET_INHIBIT_PATH}; "
+            "explicit user authorization is required to remove the hold.",
+        }
     result = _reset_request(
         auth,
         WHAM_RESET_CREDITS_CONSUME_URL,

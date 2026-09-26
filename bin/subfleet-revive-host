@@ -1,0 +1,55 @@
+#!/bin/bash
+# subfleet-revive-host — the pane command of a persistent revive host.
+#
+# `subfleet revive` starts a detached tmux session (subfleet-revive-<id>)
+# whose single pane runs this script. It fetches the lane's token itself
+# (agent-secret; never in argv, never in the tmux server environment), drops
+# any inherited Claude-session identity, and execs an INTERACTIVE
+# `claude --resume <id>` so the session stays alive after its first turn:
+# its inbox keeps working, the background tasks it arms survive, and Max can
+# `tmux attach -t subfleet-revive-<id>`. The nudge that tells the session to
+# continue is delivered into its inbox by subfleet/tickle.py afterwards.
+#
+# Usage: subfleet-revive-host --session ID --lane EMAIL --claude PATH
+#                             [--model M] [--bypass] [--log FILE]
+set -u
+SESSION=""; LANE=""; CLAUDE=""; MODEL=""; BYPASS=0; LOG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session) SESSION=$2; shift 2 ;;
+    --lane) LANE=$2; shift 2 ;;
+    --claude) CLAUDE=$2; shift 2 ;;
+    --model) MODEL=$2; shift 2 ;;
+    --bypass) BYPASS=1; shift ;;
+    --log) LOG=$2; shift 2 ;;
+    *) echo "subfleet-revive-host: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$SESSION" ] && [ -n "$LANE" ] && [ -n "$CLAUDE" ] || {
+  echo "usage: subfleet-revive-host --session ID --lane EMAIL --claude PATH [--model M] [--bypass] [--log FILE]" >&2
+  exit 2
+}
+note() {
+  local line="$(date -Iseconds) revive-host ${SESSION:0:8}: $*"
+  echo "$line" >&2
+  [ -n "$LOG" ] && echo "$line" >> "$LOG" 2>/dev/null
+}
+SECRET=${SUBFLEET_AGENT_SECRET:-$HOME/bin/agent-secret}
+TOKEN=$("$SECRET" get "claude-quota-$LANE" 2>/dev/null)
+if [ -z "$TOKEN" ]; then
+  note "no token for lane $LANE (agent-secret get claude-quota-$LANE failed); host exits"
+  # Linger briefly so the census sees a host that failed rather than a flap.
+  sleep "${SUBFLEET_REVIVE_HOST_LINGER_S:-20}"
+  exit 78
+fi
+export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"
+unset TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+# A host launched from inside a Claude session must not inherit its identity.
+unset CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_PID CLAUDE_CODE_MESSAGING_SOCKET \
+      CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_HOST_SESSION_ID CLAUDE_CODE_ENTRYPOINT
+export SUBFLEET_REVIVE_HOST_SESSION="$SESSION" SUBFLEET_REVIVE_HOST_LANE="$LANE"
+set -- --resume "$SESSION"
+[ -n "$MODEL" ] && set -- "$@" --model "$MODEL"
+[ "$BYPASS" = 1 ] && set -- "$@" --dangerously-skip-permissions
+note "exec $CLAUDE $* (lane $LANE)"
+exec "$CLAUDE" "$@"

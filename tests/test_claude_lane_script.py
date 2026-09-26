@@ -554,6 +554,97 @@ def test_auto_pick_uses_model_scoped_picker(tmp_path):
     ]]
 
 
+@pytest.mark.parametrize("detached", [False, True])
+def test_explicit_exclusions_survive_initial_pick_and_detached_reexec(tmp_path, detached):
+    env, paths = _fixture_env(
+        tmp_path,
+        "printf '{\"is_error\":false,\"result\":\"allowed lane worked\"}\\n'\n",
+    )
+    env["CAPACITY_CANDIDATES"] = "active@example.com,reviewer@example.com,allowed@example.com"
+    private_tmp = tmp_path / "private-prompts"
+    private_tmp.mkdir()
+    env["CLAUDE_LANE_TMPDIR"] = str(private_tmp)
+    args = ["-A", "-x", "active@example.com", "-x", "reviewer@example.com"]
+    if detached:
+        args.append("-d")
+
+    result = _run(env, paths, *args)
+
+    assert result.returncode == 0, result.stderr
+    if detached:
+        assert "detached pid=" in result.stdout
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and (
+            not _hook_calls(paths["hook_log"])
+            or list(private_tmp.glob("subfleet-claude-prompt.*"))
+        ):
+            time.sleep(0.05)
+    calls = [_options(call) for call in _hook_calls(paths["hook_log"])]
+    assert [(call["--email"], call["--rc"]) for call in calls] == [
+        ("allowed@example.com", "0"),
+    ]
+    assert _pick_calls(paths["pick_log"]) == [[
+        "pick", "claude", "--model", "claude-fable-5-1",
+        "--exclude", "active@example.com", "--exclude", "reviewer@example.com",
+    ]]
+    assert paths["output"].read_text().strip() == "allowed lane worked"
+
+
+@pytest.mark.parametrize("extra_args", [[], ["-A"], ["-A", "-d"]])
+def test_excluded_pinned_lane_is_rejected_before_token_access(tmp_path, extra_args):
+    env, paths = _fixture_env(
+        tmp_path,
+        "printf '{\"is_error\":false,\"result\":\"must not run\"}\\n'\n",
+    )
+    token_access = tmp_path / "token-access"
+    env["TOKEN_ACCESS"] = str(token_access)
+    env["CLAUDE_LANE_AGENT_SECRET"] = str(_write_executable(
+        paths["fake_bin"] / "tracked-agent-secret",
+        ': > "$TOKEN_ACCESS"\nprintf "test-token\\n"\n',
+    ))
+
+    result = _run(
+        env, paths, "-x", "active@example.com", "-a", "active@example.com", *extra_args,
+    )
+
+    assert result.returncode == 2
+    assert "pinned account active@example.com is excluded by -x" in result.stderr
+    assert not token_access.exists()
+    assert not paths["output"].exists()
+    assert _pick_calls(paths["pick_log"]) == []
+    assert _hook_calls(paths["hook_log"]) == []
+
+
+def test_hard_limit_rotation_preserves_explicit_exclusions(tmp_path):
+    env, paths = _fixture_env(
+        tmp_path,
+        """if [ ! -e "$FIRST_USED" ]; then
+  : > "$FIRST_USED"
+  printf '{"is_error":true,"result":"weekly limit reached"}\\n'
+  exit 9
+fi
+printf '{"is_error":false,"result":"fallback lane worked"}\\n'
+""",
+    )
+    env["FIRST_USED"] = str(tmp_path / "first-used")
+    env["CAPACITY_CANDIDATES"] = "active@example.com,pinned@example.com,fallback@example.com"
+
+    result = _run(
+        env, paths, "-a", "pinned@example.com", "-A", "-x", "active@example.com",
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [_options(call) for call in _hook_calls(paths["hook_log"])]
+    assert [(call["--email"], call["--rc"]) for call in calls] == [
+        ("pinned@example.com", "4"),
+        ("fallback@example.com", "0"),
+    ]
+    assert _pick_calls(paths["pick_log"]) == [[
+        "pick", "claude", "--model", "claude-fable-5-1",
+        "--exclude", "active@example.com", "--exclude", "pinned@example.com",
+    ]]
+
+
 def test_auto_repick_survives_failed_accounting_hook(tmp_path):
     env, paths = _fixture_env(
         tmp_path,

@@ -28,12 +28,22 @@ def headless_transcript(transcript: str | Path | None, *, max_lines: int = 5000)
     transcript holds exactly ONE text prompt (its brief) and it arrived via
     the SDK (``promptSource: sdk``); tool results are user entries too but
     carry no promptSource. Interactive sessions differ in one of two ways: a
-    human-typed prompt (``promptSource`` ``typed`` in the tmux CLI, absent in
-    the desktop app), or MANY sdk-sourced text prompts, because inbox notices
-    (``subfleet notify``) arrive as ``sdk`` — the ceremony session had 93. A
-    lane that was itself notified may show a second sdk prompt, so up to two
-    are still a lane. The entrypoint does not discriminate (lanes launched
-    through the desktop-bundled binary read ``claude-desktop``).
+    human-typed prompt (``promptSource`` ``typed`` in the tmux CLI), or MANY
+    sdk-sourced text prompts, because inbox notices (``subfleet notify``)
+    arrive as ``sdk`` — the ceremony session had 93. A lane that was itself
+    notified may show a second sdk prompt, so up to two are still a lane.
+
+    Re-measured 2026-09-07 over the 400 most recent transcripts: the desktop
+    app now tags its typed prompts ``promptSource: sdk`` too (172 desktop
+    sessions on Claude Code 2.1.263, one prompt each), so the source alone
+    made every fresh desktop session read as a lane — its nudges refused
+    (``push_to_session``), never listed cold, never revived. The desktop
+    app's entries carry ``entrypoint: claude-desktop`` and a terminal
+    session's ``cli``; a headless ``claude -p`` run's carry ``sdk-cli``. So a
+    headless prompt must be BOTH sdk-sourced and sdk-cli-hosted. Lanes that
+    subfleet launched through the desktop-bundled binary (entrypoint
+    ``claude-desktop``; 54 of the 400) are recognised by id instead —
+    ``lane_session_ids`` covered all 54 — never by this heuristic.
     """
     if not transcript:
         return False
@@ -56,8 +66,10 @@ def headless_transcript(transcript: str | Path | None, *, max_lines: int = 5000)
                 ):
                     continue  # tool results, not prompts
                 source = entry.get("promptSource")
-                if source != HEADLESS_PROMPT_SOURCE:
-                    return False  # a typed (or desktop, promptSource-less) human prompt
+                if source != HEADLESS_PROMPT_SOURCE or entry.get("entrypoint") != HEADLESS_ENTRYPOINT:
+                    # a typed prompt, or one the desktop app / a terminal
+                    # session relayed (both tag sdk since 2.1.26x)
+                    return False
                 text_prompts += 1
                 if first is None:
                     first = source

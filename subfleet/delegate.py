@@ -63,6 +63,9 @@ CODEX_MODEL_CHOICES = ("sol", "terra", "astra", "luna")
 # Frontier Codex models run at the top reasoning level (Codex's own default
 # for gpt-6-astra is "low").
 CODEX_ULTRA_EFFORT_MODELS = frozenset({"sol", "astra"})
+# Reserved by subfleet-codex; provider statuses alone never establish quota.
+CODEX_QUOTA_NO_ALTERNATE = 4
+CODEX_QUOTA_RETRY_BUDGET = 8
 # Retired from dispatch (Max, 2026-09-04: "stop using sol subagents for
 # anything. for basic stuff we should use opus, hard stuff astra"). The alias
 # still parses so older scripts, gate states, and handoffs keep working; every
@@ -430,11 +433,6 @@ def _capacity_report() -> dict[str, Any]:
         }
 
 
-#: A blind lane (no usage reading at all) may carry at most this many
-#: concurrent runs. 2026-09-03: five Opus lanes were spread across accounts
-#: whose usage subfleet could not see (keepalive probes failing → score None,
-#: still "dispatchable"), and all five died mid-run when those accounts capped.
-BLIND_LANE_MAX_IN_FLIGHT = 0
 #: Just-in-time probe results are reused within a process for this long.
 JIT_PROBE_TTL_S = 300.0
 _jit_probe_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -477,9 +475,11 @@ def _blind_lane_filter(rows: list[dict[str, Any]], model_family: str,
     """Probe lanes whose headroom is unknown before letting them be picked.
 
     A measured lane below the headroom floor is dropped and cooled until its
-    window resets; a lane that stays blind is allowed only while it carries
-    no other run. Measured lanes are annotated so the caller's sort prefers
-    them over the remaining blind ones."""
+    window resets. Missing quota telemetry is not evidence of exhaustion:
+    keep otherwise eligible lanes and let the caller prefer measured capacity
+    and lower in-flight counts. Runtime provider limits still cool the lane
+    and trigger rotation. Measured lanes are annotated for the caller's sort.
+    """
     kept = []
     for row in rows:
         if score_of(row) is not None:
@@ -489,8 +489,6 @@ def _blind_lane_filter(rows: list[dict[str, Any]], model_family: str,
         probe = _probe_lane_headroom(email) if email else {"score": None, "status": "no-email"}
         score = probe.get("score")
         if score is None:
-            if int(row.get("in_flight") or 0) > BLIND_LANE_MAX_IN_FLIGHT:
-                continue
             row = dict(row)
             row["jit_probe"] = probe.get("status")
             kept.append(row)
@@ -504,6 +502,7 @@ def _blind_lane_filter(rows: list[dict[str, Any]], model_family: str,
             continue
         row = dict(row)
         row["headroom_score"] = score
+        row["measured_headroom_score"] = score
         row["dispatch_score"] = score
         row["five_hour"] = dict(row.get("five_hour") or {}, used_percent=100.0 - score)
         row["weekly"] = dict(row.get("weekly") or {}, used_percent=100.0 - score)
@@ -523,6 +522,12 @@ def _capacity_candidates(data: dict[str, Any], family: str,
         if row.get("family") == family and row.get("dispatchable")
         and str(row.get("email") if family == "claude" else row.get("id")) not in exclude
     ]
+    if family == "codex":
+        # A runner can cool a home after the cached capacity report was made.
+        # Codex models share this account-wide pool, including Luna and Astra.
+        rows = [row for row in rows if capacity.lane_cooldown(
+            str(row.get("id") or ""), now=_now()
+        ) is None]
     if family == "claude" and model_family:
         model = capacity.normalize_claude_model(model_family)
         rows = [
@@ -537,7 +542,9 @@ def _capacity_candidates(data: dict[str, Any], family: str,
         if probe_blind:
             rows = _blind_lane_filter(
                 rows, model_family,
-                lambda row: capacity.model_headroom_score(row, model_family),
+                lambda row: capacity.model_headroom_score(
+                    row, model_family, measured_only=True
+                ),
             )
 
     def raw_tokens(row: dict[str, Any]) -> tuple[float, float]:
@@ -691,15 +698,21 @@ def _model_capacity_state(data: dict[str, Any], model: str) -> bool | None:
     if family == "codex":
         if _capacity_candidates(data, "codex"):
             return True
+        rows = [row for row in data.get("accounts", []) if row.get("family") == family]
+        if rows and all(
+            capacity.lane_cooldown(str(row.get("id") or ""), now=_now()) is not None
+            or (not row.get("dispatchable") and row.get("status") in {"limited", "exhausted"})
+            for row in rows
+        ):
+            return False
     else:
         if _capacity_candidates(
             data, "claude", model_family=CLAUDE_MODEL_DISPLAY[model]
         ):
             return True
-        # Lanes eligible for this model that the blind-lane policy withheld
-        # (no usage reading and another run in flight) are not evidence of a
-        # model-scoped limit; the telemetry is inconclusive. 2026-09-05: five
-        # blind Opus lanes were withheld and read as "opus exhausted".
+        # If probing removes a preliminarily eligible lane without a durable
+        # limit (for example, cooldown persistence failed), retain uncertainty
+        # instead of claiming every lane has a confirmed model-scoped limit.
         if _capacity_candidates(
             data, "claude", model_family=CLAUDE_MODEL_DISPLAY[model],
             probe_blind=False,
@@ -1224,6 +1237,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not args.H:
                         built.append("-A")  # auto-picked: let the runner re-pick on a usage limit
                     if model in CODEX_ULTRA_EFFORT_MODELS: built += ["-e", "ultra"]
+                    elif model == "luna":
+                        built += ["-e", "low" if args.tier == "trivial" else "medium"]
                     if args.independent_review:
                         built += ["-I", "-D", str(Path(args.review_root).expanduser().resolve())]
                     if args.b: built += ["-b", args.b]
@@ -1240,12 +1255,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     cmd = build_codex_cmd(output)
                     result = subprocess.run(cmd, env=runner_env(lane_or_home, cmd)).returncode
-                if result == 4 and not args.H and not args.dry_run and mode != "detached":
-                    # The runner already re-picked across every dispatchable
-                    # Codex home (-A) and found them limited. A tier that
-                    # starts on a Codex model (Luna) moves upward the way a
-                    # Claude tier does, instead of failing the work.
-                    next_route = next_semantic_route()
+                if result in (CODEX_QUOTA_NO_ALTERNATE, CODEX_QUOTA_RETRY_BUDGET) and not args.dry_run and mode != "detached":
+                    # The runner records each limited home before returning.
+                    # Refresh telemetry and consult those live cooldowns before
+                    # treating either a picker miss or a retry cap as exhaustion.
+                    capacity_data = _capacity_report()
+                    reset_picked_home = None
+                    capacity_view = _capacity_view(capacity_data)
+                    family_scores = {
+                        name: (capacity_data.get("families", {}).get(name) or {}).get("headroom_score")
+                        for name in ("codex", "claude")
+                    }
+                    shared_state = _model_capacity_state(capacity_data, model)
+                    if semantic_capacity_states is not None:
+                        semantic_capacity_states.update({
+                            candidate: shared_state for candidate in semantic_candidates or ()
+                            if MODEL_FAMILY[candidate] == "codex"
+                        })
+                    next_route = next_semantic_route() if shared_state is False and not args.H else None
                     if next_route is not None:
                         log_decision(lane_or_home, cmd, result)
                         promote_semantic_model(*next_route, reason="exhausted at runtime")
@@ -1333,6 +1360,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                              "-m", MODEL_NAMES[model], "-C", args.C, "-p", merged, "-o", out_path, "-s", sandbox]
                     if detached and not args.a:
                         built.append("-A")  # auto-picked: the runner re-picks on a hard limit
+                    for excluded in args.exclude:
+                        built += ["-x", excluded]
                     if args.independent_review:
                         built += ["-I", "-D", str(Path(args.review_root).expanduser().resolve())]
                     if args.b: built += ["-b", args.b]
@@ -1386,7 +1415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 lane
                                 for lane, tried_model in tried
                                 if tried_model == full_model
-                            },
+                            } | set(args.exclude),
                             model_family=model_family,
                         )
                         if model != "fable":

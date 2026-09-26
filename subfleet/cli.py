@@ -18,7 +18,10 @@
   subfleet kill <id>             # SIGTERM a running dispatch (its trap salvages + finalizes)
   subfleet sessions              # live Claude Code sessions with an inbox (notification targets)
   subfleet notify [--session ID] TEXT   # push a message into a session inbox (default: this session)
+  subfleet notices [--session ID] [--all] [--json]   # completion notices: pushed / landed / lost / revived
   subfleet hooks install|uninstall|status   # Claude Code hooks: completion catch-up + attached-runner guard
+  subfleet revive [--dry-run]        # revive cold interrupted sessions into a persistent tmux host
+  subfleet liveness [--dry-run]      # dead sessions with pending work → Telegram Max (no session needed)
   subfleet tickle [--all|--session ID] [--dry-run]   # resume nudge for sessions whose last turn was cut off
   subfleet revive [--model M] [--no-fallback] [--max N] [--dry-run]  # resume cold interrupted sessions
   subfleet login codex <N|app>   # stage a lane (re)login: server, OAuth tab, watcher — Max clicks
@@ -57,7 +60,8 @@ from . import (
     tickle,
     watchdog,
 )
-from .util import load_json, now_local, strip_private
+from . import desktop_app, liveness
+from .util import iso, load_json, now_local, strip_private
 
 
 def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
@@ -75,6 +79,9 @@ def _load_snapshot(cached: bool, live_timeout: float = 15.0) -> dict:
 
 def cmd_status(args) -> int:
     snap = _load_snapshot(args.cached)
+    # A staged desktop-app update is a scheduled kill of every app-hosted
+    # session; read the app's log fresh even from a cached snapshot (cheap).
+    snap["desktop_app"] = desktop_app.status()
     if args.json:
         print(json.dumps(snap, indent=1))
     else:
@@ -227,6 +234,7 @@ def _capacity_lane_ranking(data: dict, *, handicap: float,
     Calibrated/live rows rank by their worst-window utilization. Uncalibrated
     rows have no honest percentage, so they follow known rows and rank by raw
     weekly/5h tokens (with the active desktop account last on ties).
+    Historical ratios affect ranking only; measured headroom gates availability.
     """
     model = capacity.normalize_claude_model(model)
     ranked = []
@@ -253,8 +261,17 @@ def _capacity_lane_ranking(data: dict, *, handicap: float,
         used = [*account_used, *([model_used] if model_used is not None else [])]
         effective = max(used) if used else None
         headroom = max(0.0, min(100.0, 100.0 - effective)) if effective is not None else None
+        measured_account_headroom = _numeric(
+            row.get("measured_headroom_score", account_headroom)
+        )
+        measured_headroom = (
+            capacity.model_headroom_score(
+                dict(row, measured_headroom_score=measured_account_headroom),
+                model, measured_only=True,
+            ) if model else measured_account_headroom
+        )
         hard_status = row.get("status") not in {"ok", "exhausted"}
-        below_floor = headroom is not None and headroom < min_headroom
+        below_floor = measured_headroom is not None and measured_headroom < min_headroom
         model_states = capacity.claude_model_states(row)
         scoped_cooldowns = row.get("model_cooldowns") or {}
         default_scoped_gate = bool(scoped_cooldowns) if isinstance(scoped_cooldowns, dict) else False
@@ -264,7 +281,7 @@ def _capacity_lane_ranking(data: dict, *, handicap: float,
         )
         if (
             hard_status or below_floor
-            or (row.get("status") == "exhausted" and account_headroom is None)
+            or (row.get("status") == "exhausted" and measured_account_headroom is None)
             or model_gate or (model is None and default_scoped_gate)
         ):
             if hard_status:
@@ -289,6 +306,12 @@ def _capacity_lane_ranking(data: dict, *, handicap: float,
                     (model_window_used, model_window or {}),
                     (model_scoped_used, model_limit or {}),
                 ):
+                    if (
+                        "measured_headroom_score" in row
+                        and (window is five_hour or window is weekly)
+                        and window.get("confidence") != "live"
+                    ):
+                        continue
                     reset_at = window.get("reset_at") or window.get("resets_at")
                     if value is not None and value >= 100.0 - min_headroom and reset_at:
                         governing.append(reset_at)
@@ -310,6 +333,7 @@ def _capacity_lane_ranking(data: dict, *, handicap: float,
             "weekly_tokens": weekly.get("tokens"),
             "effective_used_percent": effective,
             "headroom_score": headroom,
+            "measured_headroom_score": measured_headroom,
             "five_hour_reset_at": five_hour.get("reset_at"),
             "weekly_reset_at": weekly.get("reset_at"),
             "learned_capacity": row.get("learned_capacity"),
@@ -486,6 +510,20 @@ def cmd_brief(args) -> int:
     return 0
 
 
+def _probe_with_retry(token: str, attempts: int = 3, pause_s: float = 2.0) -> dict:
+    """The usage probe is an auth sanity check; a transient socket error must
+    not reject a freshly minted token. Retry only on network-error."""
+    import time as _time
+    probe = {}
+    for i in range(attempts):
+        probe = claude.probe_oauth_usage(token)
+        if probe.get("status") != "network-error":
+            return probe
+        if i + 1 < attempts:
+            _time.sleep(pause_s)
+    return probe
+
+
 def cmd_enroll(args) -> int:
     """Store a per-account inference token for pinned Claude lane dispatch.
 
@@ -501,20 +539,52 @@ def cmd_enroll(args) -> int:
         print(f"subfleet enroll: {email} is not in the roster ({len(roster)} accounts); "
               f"add it to {claude.roster_config_path()} first", file=sys.stderr)
         return 2
-    if sys.stdin.isatty():
+    if getattr(args, "mint", False):
+        from . import enroll_mint
+
+        paste = bool(getattr(args, "paste", False))
+
+        def _on_url(url: str) -> None:
+            how = ("then paste the code it shows below" if paste
+                   else "the CLI receives the code on its own local callback; nothing to paste")
+            print(f"subfleet enroll: approve as {email} in the browser ({how}). "
+                  f"If it did not open, use this URL:\n  {url}", file=sys.stderr)
+
+        def _code_prompt():
+            if not sys.stdin.isatty():
+                return None
+            return input("subfleet enroll: paste the code the browser shows: ").strip()
+
+        print(f"subfleet enroll: minting a setup-token for {email} via `claude setup-token` "
+              "in a subfleet-owned pty (the token is captured, never displayed)", file=sys.stderr)
+        minted = enroll_mint.mint(paths.claude_bin(), on_url=_on_url, code_prompt=_code_prompt,
+                                  paste=paste)
+        diag_path = paths.state_dir() / "enroll-mint-last.json"
+        if not minted.token or not enroll_mint.well_formed(minted.token):
+            enroll_mint.write_diagnostic(diag_path, enroll_mint.diagnostic(minted))
+            why = minted.error or f"captured string has an unexpected shape (len {len(minted.token)})"
+            tail = "\n".join(minted.transcript.strip().splitlines()[-6:])
+            print(f"subfleet enroll: mint failed: {why}\n{tail}\n(diagnostic, token masked: {diag_path})",
+                  file=sys.stderr)
+            return 1
+        token = minted.token
+    elif sys.stdin.isatty():
         token = getpass.getpass(f"Paste setup-token for {email} (input hidden): ").strip()
     else:
         token = sys.stdin.read().strip()
     if not token:
         print("subfleet enroll: empty token", file=sys.stderr)
         return 2
-    probe = claude.probe_oauth_usage(token)
+    probe = _probe_with_retry(token)
     probe_status = probe.get("status")
+    if getattr(args, "mint", False):
+        enroll_mint.write_diagnostic(diag_path, enroll_mint.diagnostic(minted, probe))
     # setup-token credentials are inference-scoped and normally receive 403
     # from the usage endpoint. A 403 (or authenticated 429) is therefore not
     # grounds to reject the lane token; a 401 remains a hard rejection.
     if probe_status not in {"ok", "http-403", "rate-limited"}:
-        print(f"subfleet enroll: token REJECTED by usage endpoint ({probe.get('status')}) — "
+        detail = f"{probe_status}: {probe.get('error')}" if probe.get("error") else str(probe_status)
+        print(f"subfleet enroll: token REJECTED by usage endpoint ({detail}) — "
               "not storing. Is it fresh, and for the right account?", file=sys.stderr)
         return 1
     secret = f"claude-quota-{email}"
@@ -679,7 +749,11 @@ def cmd_record_run(args) -> int:
 
 
 def _notify_finished(run_id: str) -> None:
-    """Tell the dispatching session. Best-effort: never affects the runner."""
+    """Tell the dispatching session. Best-effort: never affects the runner.
+
+    A pushed notice is not confirmed by the push (notify.py: the 2026-09-06
+    21:40 push); the detached follow-up worker checks the transcript after a
+    grace and re-pushes or revives (tickle.notice_followup)."""
     try:
         run_dir, meta = run_ledger.load_run(run_id)
         info = notify.on_finish(run_id, run_dir, meta)
@@ -689,10 +763,13 @@ def _notify_finished(run_id: str) -> None:
                 {
                     "pushed": info.get("pushed"),
                     "surfaced": info.get("surfaced"),
+                    "surfaced_by": info.get("surfaced_by"),
                     "at": info.get("ts"),
                     "push": info.get("push"),
                 },
             )
+            if not info.get("surfaced") and isinstance(info.get("session_id"), str):
+                tickle.spawn_followup(info["session_id"])
     except Exception as exc:  # noqa: BLE001 - accounting must never fail a run
         print(f"subfleet _record-run: notify skipped: {exc}", file=sys.stderr)
 
@@ -903,18 +980,98 @@ def cmd_session_hook(args) -> int:
         })
         if verdict["tickle"] or deferred:
             tickle.spawn(session_id, payload.get("transcript_path"))
-    rows = notify.pending_notices(session_id, include_pushed=(args.event == "session-start"))
+    # Parked notices, plus pushed ones the transcript never showed: on a
+    # (re)start every unconfirmed push (the inbox died with the previous
+    # process), on a prompt only pushes older than the follow-up grace.
+    transcript = payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else None
+    rows = notify.notices_for_hook(session_id, args.event, transcript or notify.transcript_path(session_id),
+                                   source=payload.get("source") if isinstance(payload.get("source"), str) else None)
     if not rows:
         return 0
     context = notify.render_pending(session_id, rows)
-    notify.mark_surfaced(session_id, [row["run_id"] for row in rows])
+    notify.mark_surfaced(session_id, [row["run_id"] for row in rows], how=f"hook:{args.event}")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}))
     return 0
 
 
+def cmd_notice_followup_worker(args) -> int:
+    """Detached follow-up spawned when a completion notice is written
+    (tickle.spawn_followup): after the grace, confirm / re-push / revive."""
+    results = tickle.followup_worker(args.session, delay_s=args.delay, rounds=args.rounds)
+    if args.json:
+        print(json.dumps(results, indent=1))
+    return 0
+
+
+def _notice_followup_after_pass(*, dry_run: bool) -> None:
+    """The backstop for the detached worker (a reboot kills it; a push can
+    be dropped hours after the worker exited): every revive pass re-checks
+    each unresolved notice."""
+    try:
+        results = tickle.notice_followup_pass(dry_run=dry_run)
+    except Exception as exc:  # the follow-up must never take the revive pass down
+        print(f"subfleet notices: follow-up failed: {exc}", file=sys.stderr)
+        return
+    text = tickle.format_followup(results)
+    if text:
+        print(text)
+
+
+def cmd_notices(args) -> int:
+    """Completion notices and where each one stands (unresolved by default)."""
+    session_ids = [args.session] if args.session else sorted(
+        path.stem for path in notify.notices_dir().glob("*.jsonl")
+    ) if notify.notices_dir().is_dir() else []
+    rows = []
+    for session_id in session_ids:
+        for row in notify._read_notices(notify.notices_path(session_id)):
+            if row.get("surfaced") and not args.all:
+                continue
+            followup = notify.followup_of(row)
+            if row.get("surfaced"):
+                how = row.get("surfaced_by")
+                if how == "transcript":
+                    state = "landed"
+                elif how:
+                    state = f"surfaced ({how})"
+                elif row.get("pushed"):
+                    # rows written before 2026-09-07 were marked at push time
+                    state = "surfaced (legacy: marked at push time, unverified)"
+                else:
+                    state = "surfaced (hook)"
+            elif followup.get("revive"):
+                state = f"revived pid={followup['revive'].get('pid')} lane={followup['revive'].get('lane')}"
+            elif followup.get("lost"):
+                state = "LOST (hooks render it)"
+            elif row.get("pushed"):
+                state = f"pushed ×{len(notify.delivery_attempts(row))}, unconfirmed"
+            else:
+                state = f"parked ({(row.get('push') or {}).get('reason') or 'not delivered'})"
+            anchor = notify.delivery_anchor(row)
+            rows.append({
+                "session_id": row.get("session_id") or session_id, "run_id": row.get("run_id"),
+                "rc": row.get("rc"), "state": state, "at": row.get("ts"),
+                "anchor": iso(anchor) if anchor else None, "surfaced_at": row.get("surfaced_at"),
+                "pushes": len(notify.delivery_attempts(row)), "followup": followup or None,
+            })
+    if args.json:
+        print(json.dumps(rows, indent=1))
+        return 0
+    if not rows:
+        print("subfleet notices: nothing unresolved" if not args.all else "subfleet notices: none recorded")
+        return 0
+    print(f"{'session':<10} {'run':<44} {'rc':>4} {'at':<26} state")
+    for row in rows:
+        print(f"{str(row['session_id'])[:8] + '…':<10} {str(row['run_id']):<44.44} {str(row['rc']):>4} "
+              f"{str(row['at']):<26} {row['state']}")
+    return 0
+
+
 def cmd_tickle_worker(args) -> int:
-    """Detached nudger spawned by the SessionStart hook (or `subfleet tickle`)."""
-    verdict = tickle.deliver(args.session, args.transcript, delay_s=args.delay, force=args.force)
+    """Detached nudger spawned by the SessionStart hook, the revive launcher
+    (with --await-inbox), or `subfleet tickle`."""
+    verdict = tickle.deliver(args.session, args.transcript, delay_s=args.delay, force=args.force,
+                             await_inbox_s=float(getattr(args, "await_inbox", 0.0) or 0.0))
     return 0 if verdict.get("delivered") else 1
 
 
@@ -925,14 +1082,27 @@ def cmd_revive(args) -> int:
         allow_fallback=not args.no_fallback,
     )
     if not results:
+        # Nothing cold — but the after-pass checks are not about cold
+        # sessions: unresolved completion notices (a live seat that dropped
+        # a push) and the liveness relay run on every pass regardless.
         print("subfleet revive: nothing cold to revive")
+        _notice_followup_after_pass(dry_run=args.dry_run)
+        _liveness_after_pass(dry_run=args.dry_run)
         return 0
     revived = 0
     for row in results:
         sid = (row.get("session_id") or "-")[:8]
+        if row.get("stalled_host"):
+            verb = "reaped" if row.get("reaped") else ("would reap" if args.dry_run else "could not reap")
+            print(f"  {sid}… {verb} stalled tmux host {row.get('tmux_session')} "
+                  f"({row['stalled_host']}); lane cache cleared" + (f" — {row['error']}" if row.get("error") else ""))
+            continue
         if row.get("revived"):
             revived += 1
-            print(f"  {sid}… revived pid={row['pid']} lane={row['lane']} "
+            host = row.get("host") or tickle.REVIVE_HOST_PRINT
+            where = (f" tmux={row['tmux_session']} (attach: {tickle.tmux_attach_hint(row['session_id'])})"
+                     if row.get("tmux_session") else "")
+            print(f"  {sid}… revived pid={row['pid']} host={host}{where} lane={row['lane']} "
                   f"model={row.get('model') or '-'} — {row.get('detail','')[:70]}")
         elif row.get("would_revive"):
             models = ",".join(row.get("models") or [])
@@ -943,6 +1113,31 @@ def cmd_revive(args) -> int:
     verb = "would revive" if args.dry_run else "revived"
     print(f"subfleet revive: {verb} {sum(1 for r in results if r.get('revived') or r.get('would_revive'))} session(s)"
           if args.dry_run else f"subfleet revive: revived {revived} session(s)")
+    _notice_followup_after_pass(dry_run=args.dry_run)
+    _liveness_after_pass(dry_run=args.dry_run)
+    return 0
+
+
+def _liveness_after_pass(*, dry_run: bool) -> None:
+    """The session-independent relay to Max, run on the revive cadence (every
+    two minutes under launchd) so a dead session with pending work is
+    reported within the grace period, not at the watchdog's next half hour."""
+    try:
+        summary = liveness.run(dry_run=dry_run)
+    except Exception as exc:  # the relay must never take the revive pass down
+        print(f"subfleet liveness: check failed: {exc}", file=sys.stderr)
+        return
+    if summary.get("alerts_sent") or summary.get("recovered"):
+        print(liveness.format_summary(summary))
+
+
+def cmd_liveness(args) -> int:
+    """Dead sessions waiting on a process; Telegram Max past the grace period."""
+    summary = liveness.run(dry_run=args.dry_run, grace_minutes=args.grace)
+    if args.json:
+        print(json.dumps(summary, indent=1))
+    else:
+        print(liveness.format_summary(summary))
     return 0
 
 
@@ -1383,6 +1578,10 @@ def main(argv=None) -> int:
         p_gate_kind = gate_sub.add_parser(kind, help=f"review an exact {kind} revision")
         p_gate_kind.add_argument("target", help=target_help)
         p_gate_kind.add_argument("--peer", required=True, choices=("fable", "sol", "astra"))
+        p_gate_kind.add_argument("--peer-account", metavar="EMAIL",
+                                 help="pin this review to an enrolled Claude account")
+        p_gate_kind.add_argument("--exclude-account", action="append", default=[], metavar="EMAIL",
+                                 help="exclude a Claude account from this review (repeatable)")
         p_gate_kind.add_argument(
             "--main-approve",
             action="store_true",
@@ -1390,7 +1589,10 @@ def main(argv=None) -> int:
         )
         p_gate_kind.add_argument("--brief", help="bounded UTF-8 review brief")
         p_gate_kind.add_argument("-C", dest="workdir", help="review worktree (default: cwd)")
-        p_gate_kind.add_argument("--max-rounds", type=int, default=4)
+        p_gate_kind.add_argument(
+            "--max-rounds", type=int, default=0,
+            help="maximum peer review rounds (default: 0, unlimited)",
+        )
         p_gate_kind.add_argument("--json", action="store_true")
         p_gate_kind.add_argument("--dry-run", action="store_true")
         if kind == "pr":
@@ -1415,6 +1617,14 @@ def main(argv=None) -> int:
     p_gate_continue.add_argument("--expect-base", help="full PR base OID approved by the main agent")
     p_gate_continue.add_argument("--expect-sha256", help="full plan SHA-256 approved by the main agent")
     p_gate_continue.add_argument("--response", help="main agent's bounded UTF-8 response/evidence")
+    p_gate_continue.add_argument("--peer-account", metavar="EMAIL",
+                                 help="pin this review to an enrolled Claude account")
+    p_gate_continue.add_argument("--exclude-account", action="append", default=[], metavar="EMAIL",
+                                 help="exclude a Claude account from this review (repeatable)")
+    p_gate_continue.add_argument(
+        "--max-rounds", type=int,
+        help="change the limit for the next review; 0 removes it (omitted: keep current limit)",
+    )
     p_gate_continue.add_argument("--json", action="store_true")
     p_gate_continue.add_argument("--dry-run", action="store_true")
 
@@ -1446,6 +1656,29 @@ def main(argv=None) -> int:
     p_tickle_worker.add_argument("--transcript")
     p_tickle_worker.add_argument("--delay", type=float, default=0.0)
     p_tickle_worker.add_argument("--force", action="store_true")
+    p_tickle_worker.add_argument("--await-inbox", dest="await_inbox", type=float, default=0.0,
+                                 help="wait up to S seconds for the session's inbox before nudging")
+
+    p_followup = sub.add_parser("_notice-followup", help=argparse.SUPPRESS)
+    p_followup.add_argument("--session", required=True)
+    p_followup.add_argument("--delay", type=float, default=None,
+                            help="grace before each check (default SUBFLEET_NOTICE_FOLLOWUP_S or 300)")
+    p_followup.add_argument("--rounds", type=int, default=tickle.NOTICE_WORKER_ROUNDS)
+    p_followup.add_argument("--json", action="store_true")
+
+    p_notices = sub.add_parser("notices", help="completion notices and where each stands (unresolved by default)")
+    p_notices.add_argument("--session", help="one session id (see `subfleet sessions`)")
+    p_notices.add_argument("--all", action="store_true", help="include surfaced notices")
+    p_notices.add_argument("--json", action="store_true")
+
+    p_liveness = sub.add_parser(
+        "liveness",
+        help="dead sessions with pending work (no live process); Telegram Max after the grace period",
+    )
+    p_liveness.add_argument("--dry-run", action="store_true", help="print the alert instead of sending")
+    p_liveness.add_argument("--grace", type=float, default=None, metavar="MIN",
+                            help="minutes a session must stay dead before alerting (default SUBFLEET_LIVENESS_GRACE_MIN or 10)")
+    p_liveness.add_argument("--json", action="store_true")
 
     p_muster = sub.add_parser("muster", help="roll-call every recently-active session: resume the interrupted, ask the idle to continue standing work")
     p_muster.add_argument("--dry-run", action="store_true")
@@ -1553,6 +1786,14 @@ def main(argv=None) -> int:
 
     p_enroll = sub.add_parser("enroll", help="store a Claude setup-token for pinned lane dispatch")
     p_enroll.add_argument("email", help="account email (must be in claude-accounts.json roster)")
+    p_enroll.add_argument("--mint", action="store_true",
+                          help="run `claude setup-token` in a subfleet-owned pty and capture the "
+                               "token: you click Approve in the browser, the CLI receives the code "
+                               "on its own local callback, subfleet stores the token; nothing is "
+                               "shown or pasted")
+    p_enroll.add_argument("--paste", action="store_true",
+                          help="with --mint: if the browser callback cannot reach the CLI, paste "
+                               "the code from the hosted page at a prompt instead")
 
     p_canonical = sub.add_parser("_canonical-model", help=argparse.SUPPRESS)
     p_canonical.add_argument("model")
@@ -1599,8 +1840,9 @@ def main(argv=None) -> int:
         "status", "capacity", "reserve", "runs", "pick", "run", "codex", "claude", "mirror", "login",
         "errors", "watch", "keepalive", "brief", "enroll", "reset", "_record-lane-run", "_record-run",
         "_canonical-model", "_api-lane-check",
-        "_record-codex-cooldown", "wait", "kill", "sessions", "notify", "hooks", "_session-hook",
-        "_tickle", "tickle", "muster", "revive", "resume-codex", "handoff", "gate",
+        "_record-codex-cooldown", "wait", "kill", "sessions", "notify", "notices", "hooks", "_session-hook",
+        "_tickle", "_notice-followup", "tickle", "muster", "revive", "resume-codex", "handoff", "gate",
+        "liveness",
     }
     if not argv or (argv[0] not in known and argv[0] not in ("-h", "--help")):
         argv = ["status", *argv]
@@ -1646,12 +1888,15 @@ def main(argv=None) -> int:
         "gate": cmd_gate,
         "sessions": cmd_sessions,
         "notify": cmd_notify,
+        "notices": cmd_notices,
         "hooks": cmd_hooks,
         "_session-hook": cmd_session_hook,
         "_tickle": cmd_tickle_worker,
+        "_notice-followup": cmd_notice_followup_worker,
         "tickle": cmd_tickle,
         "muster": cmd_muster,
         "revive": cmd_revive,
+        "liveness": cmd_liveness,
     }
     if args.command == "hooks" and not args.hooks_command:
         args.hooks_command = "status"

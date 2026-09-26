@@ -4,7 +4,7 @@ verdicts. Every number carries its provenance (live probe vs observed-at)."""
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import capacity, capacity_expiry, claude, codex, paths, reset_policy, run_ledger
+from . import capacity, capacity_expiry, claude, codex, desktop_app, paths, reset_policy, run_ledger
 from .util import atomic_write_json, iso, load_json, now_local, parse_iso, strip_private
 
 # A home is dispatchable only with at least this much 5h-window headroom.
@@ -342,6 +342,9 @@ def build(live: bool = True, timeout: float = 15.0, transcript_hours: float = 24
             "generated_at": iso(now),
             "codex": codex_section,
             "claude": claude_section,
+            # The desktop app's staged update (read from its main.log): a
+            # scheduled kill of every app-hosted session, time unknown.
+            "desktop_app": desktop_app.status(now=now),
         }
     )
 

@@ -22,7 +22,7 @@ def _plan_args(tmp_path: Path, plan: Path, **overrides) -> Namespace:
         "expect_sha256": hashlib.sha256(plan.read_bytes()).hexdigest(),
         "brief": None,
         "workdir": str(tmp_path),
-        "max_rounds": 4,
+        "max_rounds": 0,
         "json": False,
         "dry_run": False,
         "on_agreement": "proceed",
@@ -41,6 +41,7 @@ def _continue_args(gate_id: str, *, plan: Path | None = None, **overrides) -> Na
         "expect_base": "b" * 40,
         "expect_sha256": hashlib.sha256(plan.read_bytes()).hexdigest() if plan else None,
         "response": None,
+        "max_rounds": None,
         "json": False,
         "dry_run": False,
     }
@@ -58,7 +59,7 @@ def _pr_args(tmp_path: Path, **overrides) -> Namespace:
         "expect_base": "b" * 40,
         "brief": None,
         "workdir": str(tmp_path),
-        "max_rounds": 4,
+        "max_rounds": 0,
         "json": False,
         "dry_run": False,
         "on_agreement": "merge",
@@ -103,6 +104,93 @@ def _only_gate(tmp_path: Path) -> tuple[str, Path]:
     gates = [path for path in (tmp_path / "state" / "gates").iterdir() if path.is_dir()]
     assert len(gates) == 1
     return gates[0].name, gates[0]
+
+
+def test_gate_account_routing_is_per_dispatch_and_recorded(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Exact plan\n")
+    seen = []
+
+    def unavailable_peer(argv):
+        seen.append(list(argv))
+        return 3
+
+    account = "review@example.org"
+    excluded = ["interactive@example.org", "busy@example.org"]
+    assert consensus.run(_plan_args(
+        tmp_path, plan, peer_account=account, exclude_account=excluded,
+    ), delegate_main=unavailable_peer) == 4
+    gate_id, gate_dir = _only_gate(tmp_path)
+    assert seen[-1][-6:] == ["-a", account, "-x", excluded[0], "-x", excluded[1]]
+
+    assert consensus.run(_continue_args(
+        gate_id, plan=plan, peer_account="alternate@example.org",
+        exclude_account=[excluded[0]],
+    ), delegate_main=unavailable_peer) == 4
+    assert seen[-1][-4:] == ["-a", "alternate@example.org", "-x", excluded[0]]
+
+    assert consensus.run(_continue_args(gate_id, plan=plan),
+                         delegate_main=unavailable_peer) == 4
+    assert "-a" not in seen[-1] and "-x" not in seen[-1]
+    state = json.loads((gate_dir / "gate.json").read_text())
+    assert [r["peer_argv"] for r in state["rounds"]] == seen
+
+
+@pytest.mark.parametrize("routing,message", [
+    ({"peer": "astra", "peer_account": "review@example.org"}, "require a Claude peer"),
+    ({"peer": "astra", "exclude_account": ["interactive@example.org"]}, "require a Claude peer"),
+    ({"peer_account": "same@example.org", "exclude_account": ["same@example.org"]}, "cannot also appear"),
+])
+def test_new_gate_rejects_invalid_account_routing_before_mutation(tmp_path, capsys, routing, message):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Exact plan\n")
+    seen = []
+    assert consensus.run(_plan_args(tmp_path, plan, **routing),
+                         delegate_main=lambda argv: seen.append(argv) or 0) == 2
+    assert message in capsys.readouterr().err
+    assert not seen
+    assert not (tmp_path / "state" / "gates").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_continue_rejects_invalid_account_routing_without_mutation(tmp_path, capsys, dry_run):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Exact plan\n")
+    assert consensus.run(_plan_args(tmp_path, plan, peer="astra"),
+                         delegate_main=lambda argv: 3) == 4
+    gate_id, gate_dir = _only_gate(tmp_path)
+    before = (gate_dir / "gate.json").read_bytes()
+    seen = []
+    assert consensus.run(_continue_args(
+        gate_id, plan=plan, dry_run=dry_run, exclude_account=["interactive@example.org"],
+    ), delegate_main=lambda argv: seen.append(argv) or 0) == 2
+    assert "require a Claude peer" in capsys.readouterr().err
+    assert not seen
+    assert (gate_dir / "gate.json").read_bytes() == before
+
+
+def test_gate_account_dry_runs_preview_routing_without_dispatch(tmp_path, capsys):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Exact plan\n")
+    routing = {"peer_account": "review@example.org", "exclude_account": ["interactive@example.org"]}
+    seen = []
+    assert consensus.run(_plan_args(tmp_path, plan, dry_run=True, json=True, **routing),
+                         delegate_main=lambda argv: seen.append(argv) or 0) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["peer_account"] == routing["peer_account"]
+    assert preview["exclude_accounts"] == routing["exclude_account"]
+    assert not (tmp_path / "state" / "gates").exists()
+    assert consensus.run(_plan_args(tmp_path, plan), delegate_main=lambda argv: 3) == 4
+    capsys.readouterr()
+    gate_id, gate_dir = _only_gate(tmp_path)
+    before = (gate_dir / "gate.json").read_bytes()
+    assert consensus.run(_continue_args(gate_id, plan=plan, dry_run=True, json=True, **routing),
+                         delegate_main=lambda argv: seen.append(argv) or 0) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["peer_account"] == routing["peer_account"]
+    assert preview["exclude_accounts"] == routing["exclude_account"]
+    assert not seen
+    assert (gate_dir / "gate.json").read_bytes() == before
 
 
 @pytest.fixture(autouse=True)
@@ -287,10 +375,136 @@ def test_max_rounds_stops_instead_of_spinning(tmp_path):
     assert consensus.run(
         _plan_args(tmp_path, plan, max_rounds=1), delegate_main=peer
     ) == 4
-    _, gate_dir = _only_gate(tmp_path)
+    gate_id, gate_dir = _only_gate(tmp_path)
     state = json.loads((gate_dir / "gate.json").read_text())
     assert state["status"] == "blocked"
     assert "maximum" in state["blocker"]
+    plan.write_text("revised plan\n")
+    calls = []
+    assert consensus.run(
+        _continue_args(gate_id, plan=plan),
+        delegate_main=lambda argv: calls.append(argv) or 0,
+    ) == 4
+    state = json.loads((gate_dir / "gate.json").read_text())
+    assert state["max_rounds"] == 1 and len(state["rounds"]) == 1
+    assert calls == []
+
+
+def test_default_gate_can_reach_agreement_after_six_requested_changes(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("revision 1\n")
+    calls = []
+
+    def peer(argv):
+        calls.append(argv)
+        if len(calls) <= 6:
+            _output(
+                argv, "changes_requested",
+                [{"severity": "low", "location": "plan", "description": "clarify next step"}],
+            )
+        else:
+            _output(argv, "approve")
+        return 0
+
+    assert consensus.run(_plan_args(tmp_path, plan), delegate_main=peer) == 3
+    gate_id, gate_dir = _only_gate(tmp_path)
+    for number in range(2, 8):
+        plan.write_text(f"revision {number}\n")
+        assert consensus.run(
+            _continue_args(gate_id, plan=plan), delegate_main=peer,
+        ) == (0 if number == 7 else 3)
+        state = json.loads((gate_dir / "gate.json").read_text())
+        assert state["status"] == ("completed" if number == 7 else "changes_requested")
+    assert state["max_rounds"] == 0
+    assert [round_["status"] for round_ in state["rounds"]] == ["changes_requested"] * 6 + ["approve"]
+    assert len(calls) == 7 and (gate_dir / "certificate.json").exists()
+
+
+@pytest.mark.parametrize("max_rounds,verdict,code", [(0, "approve", 0), (2, "changes_requested", 4)])
+def test_cap_blocked_gate_can_continue_with_an_audited_limit_change(
+    tmp_path, max_rounds, verdict, code,
+):
+    plan = tmp_path / "plan.md"
+    plan.write_text("unchanged plan\n")
+    response = tmp_path / "response.md"
+    response.write_text("The requested clarification is already supported by the cited evidence.\n")
+    calls = []
+
+    def peer(argv):
+        calls.append(Path(argv[argv.index("-p") + 1]).read_text())
+        current_verdict = "changes_requested" if len(calls) == 1 else verdict
+        findings = [] if current_verdict == "approve" else [
+            {"severity": "low", "location": "plan", "description": "clarify evidence"},
+        ]
+        _output(argv, current_verdict, findings)
+        return 0
+
+    assert consensus.run(
+        _plan_args(tmp_path, plan, max_rounds=1), delegate_main=peer,
+    ) == 4
+    gate_id, gate_dir = _only_gate(tmp_path)
+    original = json.loads((gate_dir / "gate.json").read_text())
+    assert consensus.run(
+        _continue_args(gate_id, plan=plan, max_rounds=max_rounds, response=str(response)),
+        delegate_main=peer,
+    ) == code
+    state = json.loads((gate_dir / "gate.json").read_text())
+    assert state["id"] == gate_id and state["max_rounds"] == max_rounds
+    assert len(state["rounds"]) == 2 and state["rounds"][0] == original["rounds"][0]
+    assert "clarify evidence" in calls[1] and response.read_text().strip() in calls[1]
+    assert len(state["round_limit_changes"]) == 1
+    change = state["round_limit_changes"][0]
+    assert change["previous_max_rounds"] == 1 and change["max_rounds"] == max_rounds
+    assert change["expected_revision"] == state["rounds"][1]["main_approval"]["expected_revision"]
+    assert change["at"]
+    assert state["status"] == ("completed" if code == 0 else "blocked")
+    assert (gate_dir / "certificate.json").exists() is (code == 0)
+
+
+@pytest.mark.parametrize("kind", ["plan", "pr"])
+def test_new_gate_rejects_negative_limit_without_creating_state(tmp_path, kind):
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n")
+    args = _plan_args(tmp_path, plan, max_rounds=-1) if kind == "plan" else _pr_args(tmp_path, max_rounds=-1)
+    calls = []
+    assert consensus.run(
+        args, delegate_main=lambda argv: calls.append(argv) or 0, runner=PrRunner(),
+    ) == 2
+    assert calls == [] and not (tmp_path / "state" / "gates").exists()
+
+
+@pytest.mark.parametrize(
+    "overrides,code",
+    [
+        ({"max_rounds": -1}, 2),
+        ({"max_rounds": 0, "main_approve": False}, 2),
+        ({"max_rounds": 0, "expect_sha256": "f" * 64}, 4),
+        ({"max_rounds": 0, "expect_sha256": None}, 2),
+    ],
+)
+def test_limit_override_cannot_mutate_state_without_valid_approval(tmp_path, overrides, code):
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n")
+
+    def peer(argv):
+        _output(
+            argv, "changes_requested",
+            [{"severity": "low", "location": "plan", "description": "clarify"}],
+        )
+        return 0
+
+    assert consensus.run(
+        _plan_args(tmp_path, plan, max_rounds=1), delegate_main=peer,
+    ) == 4
+    gate_id, gate_dir = _only_gate(tmp_path)
+    state_before = (gate_dir / "gate.json").read_bytes()
+    plan.write_text("revised plan\n")
+    calls = []
+    assert consensus.run(
+        _continue_args(gate_id, plan=plan, **overrides),
+        delegate_main=lambda argv: calls.append(argv) or 0,
+    ) == code
+    assert calls == [] and (gate_dir / "gate.json").read_bytes() == state_before
 
 
 class PrRunner:
@@ -545,18 +759,57 @@ def test_fable_attestation_must_name_the_requested_served_model(tmp_path):
     assert consensus.run(_plan_args(tmp_path, plan), delegate_main=peer) == 4
 
 
-def test_dry_run_prepares_fingerprint_without_approval_or_dispatch(tmp_path, capsys):
+@pytest.mark.parametrize("max_rounds", [0, 4])
+def test_dry_run_prepares_fingerprint_without_approval_or_dispatch(tmp_path, capsys, max_rounds):
     plan = tmp_path / "plan.md"
     plan.write_text("plan\n")
     called = []
     assert consensus.run(
-        _plan_args(tmp_path, plan, dry_run=True, json=True, main_approve=False, expect_sha256=None),
+        _plan_args(
+            tmp_path, plan, dry_run=True, json=True, main_approve=False,
+            expect_sha256=None, max_rounds=max_rounds,
+        ),
         delegate_main=lambda argv: called.append(argv) or 0,
     ) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["revision"]["sha256"] == hashlib.sha256(plan.read_bytes()).hexdigest()
+    assert preview["max_rounds"] == max_rounds
     assert called == []
     assert not (tmp_path / "state" / "gates").exists()
+
+
+@pytest.mark.parametrize("max_rounds,effective", [(None, 4), (0, 0), (8, 8)])
+def test_continue_dry_run_previews_limit_without_changing_gate(
+    tmp_path, capsys, max_rounds, effective,
+):
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n")
+
+    def peer(argv):
+        _output(
+            argv, "changes_requested",
+            [{"severity": "low", "location": "plan", "description": "clarify"}],
+        )
+        return 0
+
+    assert consensus.run(
+        _plan_args(tmp_path, plan, max_rounds=4), delegate_main=peer,
+    ) == 3
+    gate_id, gate_dir = _only_gate(tmp_path)
+    before = {path.relative_to(gate_dir): path.read_bytes() for path in gate_dir.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    calls = []
+    assert consensus.run(
+        _continue_args(
+            gate_id, max_rounds=max_rounds, dry_run=True, json=True, main_approve=False,
+        ),
+        delegate_main=lambda argv: calls.append(argv) or 0,
+    ) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["max_rounds"] == effective and preview["current_max_rounds"] == 4
+    assert preview["next_round"] == 2
+    after = {path.relative_to(gate_dir): path.read_bytes() for path in gate_dir.rglob("*") if path.is_file()}
+    assert calls == [] and after == before
 
 
 def test_continue_dry_run_never_retries_a_failed_merge_or_changes_state(tmp_path):
@@ -586,7 +839,7 @@ def test_concurrent_continuation_cannot_reserve_or_overwrite_a_live_round(tmp_pa
         prompt = Path(argv[argv.index("-p") + 1])
         prompt_before = prompt.read_bytes()
         assert consensus.run(
-            _continue_args(gate_id, plan=plan),
+            _continue_args(gate_id, plan=plan, max_rounds=0),
             delegate_main=lambda nested: called.append(nested) or 0,
         ) == 4
         assert (gate_dir / "gate.json").read_bytes() == state_before
@@ -594,7 +847,7 @@ def test_concurrent_continuation_cannot_reserve_or_overwrite_a_live_round(tmp_pa
         _output(argv, "approve")
         return 0
 
-    assert consensus.run(_plan_args(tmp_path, plan), delegate_main=peer) == 0
+    assert consensus.run(_plan_args(tmp_path, plan, max_rounds=4), delegate_main=peer) == 0
     assert called == []
     _, gate_dir = _only_gate(tmp_path)
     state = json.loads((gate_dir / "gate.json").read_text())

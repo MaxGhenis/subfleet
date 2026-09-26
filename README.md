@@ -42,6 +42,8 @@ expect a `/Users/<user>` home.
     subfleet enroll <email>        store a Claude setup-token (lane)
     subfleet keepalive             open idle Claude 5h windows (launchd every 5h05m)
     subfleet mirror                desktop session mirror pass (launchd every 60s)
+    subfleet revive [--dry-run]    revive cold interrupted sessions into a persistent tmux host
+    subfleet liveness [--dry-run]  dead sessions with pending work → Telegram Max (no session needed)
     subfleet watch / brief / errors / capacity
 
 Components: the `subfleet` Python package (snapshot, capacity model, watchdog,
@@ -119,7 +121,10 @@ soonest-expiring weekly window until that lane is exhausted. A live wham
 it re-enters automatically when the clock passes. Codex in-flight counts and
 app-shadow metadata remain visible but do not affect order. Claude keeps its
 worst-window headroom score, active-app protection, and lower-in-flight
-tiebreak.
+tiebreak. Missing Claude quota telemetry does not impose a one-job account
+limit: otherwise eligible lanes remain available, ordered by measured capacity
+and current load. Confirmed quota exhaustion and model cooldowns still exclude
+lanes, and a hard provider limit triggers rotation.
 
 ## Data sources
 
@@ -217,6 +222,105 @@ transcript quiet, since outside SessionStart an "interrupted" tail can just
 be a long-running tool call); `subfleet tickle --session <id> --force`
 overrides every guard. Outcomes and skip reasons land in
 `state/subfleet/tickles/<session>.json`.
+
+## Revive: cold sessions come back in a persistent host
+
+`subfleet revive` (launchd `com.maxghenis.cos.subfleet-revive`, every two
+minutes) lists *cold* sessions — a recent transcript with NO live process —
+and starts each one's own continuation. Fixed 2026-09-06 after the seat-death
+forensics (`~/m6-sol-lanes/e8-ops/opus-scratch/ceremony-29c03102/
+seat-death-forensics-20260906.md`): on 2026-09-05 the desktop app's staged
+update quit killed nine app-hosted sessions at 22:57:55; the revive of the
+ceremony session was a one-shot `claude -p --resume`, which answered one
+turn, armed four watchers, exited at 23:06:32, and left a tail that read
+"completed", so nothing revived it again until Max typed at 06:06.
+
+**Host.** The default host is a detached tmux session,
+`subfleet-revive-<session id>`, on subfleet's OWN tmux server
+(`tmux -L subfleet`, started with `-f /dev/null` so no plugin restores
+anything into it) running interactive `claude --resume <id>` through
+`bin/subfleet-revive-host`. The pane script fetches the lane token itself
+(`agent-secret get claude-quota-<email>`) — no token in argv, in the tmux
+environment, or in the scrollback — drops any inherited Claude-session
+identity, and execs claude. The session stays resumable, keeps its inbox, and
+the background tasks it arms live as long as it does; attach with
+`tmux -L subfleet attach -t subfleet-revive-<id>`. The continue nudge is
+pushed into the new process's inbox once it binds (the SessionStart hook's
+worker, with the launcher's own `--await-inbox` deliverer as backstop). The
+one-shot `-p` host remains only as the fallback when tmux is missing or the
+launch fails (`SUBFLEET_REVIVE_HOST=print` forces it), and its prompt says it
+is a one-shot. Why not the default server: on 2026-09-06 15:56 the revive
+job found no server, became it (a launchd child, 256 open files), and
+tmux-continuum restored 245 sessions into it — every later pane failed to
+fork ("Too many open files", then "Device not configured" as PTYs ran out)
+and revives fell back to one-shots. The launcher also lifts its own
+open-files limit before starting the server.
+
+**What counts as cold work.** An interrupted tail (a tool call with no
+result, a tool result the model never continued from, an unanswered prompt),
+and — new — a *completed* tail whose last turn armed background work
+(`run_in_background` shells, agents, monitors, timers, workflows, read from
+the harness's own tool-result text) or whose session still has detached
+`subfleet run` dispatches RUNNING: their notifications can only land in a
+live process, so `cold_sessions` lists it as `needs-continuation` and the
+sweep revives it at that point. A live session with the same tail is left
+alone (its own process gets the notifications). A one-shot host's exit after
+such a turn is therefore never "completed" (`tests/test_revive_host.py`,
+`tests/test_revive_hosts.py`).
+
+**Guards.** One revive per interruption point; only bypass-mode sessions;
+never a lane (`lanes.py` — a headless prompt is one that is BOTH
+`promptSource: sdk` and `entrypoint: sdk-cli`; since Claude Code 2.1.26x the
+desktop app tags its typed prompts `sdk` too, and the source alone made every
+fresh desktop session read as a lane), never a retired session, the
+session's own model, a concurrent-launch cap that counts one-shots in flight
+but not persistent hosts, and a loop guard (four launches in two hours parks
+the session for the liveness alert). A persistent host whose pane shows a
+blocking limit dialog ("Stop and wait for limit to reset", "Switch to usage
+credits" — seen 2026-09-06 21:07 on two hosts whose lane hit its limit, alive
+and idle for a day) is torn down at the start of every pass, the lane cache is
+cleared, the interruption point is reopened, and the session is revived again
+on a lane that answers.
+
+**Messages.** The nudge and the revive prompt assert no cause. They carry the
+transcript classification, the lane / model / host subfleet launched, the
+limit line only when the transcript's last provider response was a limit
+banner (`limit_line`), and otherwise "cause not determined by subfleet". The
+old template ("cut off (usage limit or account switch) … you are on a fresh
+account now") was repeated to Max as diagnosis when the desktop app's update
+had quit; it is gone, and a test forbids its return.
+
+## Liveness alert (the relay that is not a session)
+
+Every `subfleet revive` pass and every watchdog cycle runs
+`liveness.run()`: sessions registered in `~/.claude/sessions` or with a
+transcript written in the last 12 hours, with no live process and no live
+revive host, that are waiting on one — an interrupted or needs-continuation
+tail, armed background work, pending detached runs, or a completion notice
+nothing confirmed — and that have stayed dead past the grace period
+(`SUBFLEET_LIVENESS_GRACE_MIN`, default 10; several revive passes) are
+reported to Max by Telegram through `~/bin/tg` (the `notify` transport is the
+fallback), naming the session, its cwd, the last transcript write, what is
+pending, what revive did, and that the cause is not determined. One alert per
+session and interruption point, re-sent every 6 h while it persists, an
+all-clear when the session is live again, state in
+`state/subfleet/liveness-alerts.json`. `subfleet liveness [--dry-run]
+[--grace MIN] [--json]` shows the roster. Nothing in it depends on a Claude
+session being alive: the 2026-09-05 outage would have been reported at
+~23:07 instead of 06:06.
+
+## Desktop app update warning
+
+`subfleet status` reads the desktop app's own `~/Library/Logs/Claude/main.log`
+(read-only, `desktop_app.py`) and prints one line when an update is staged:
+`WARNING: desktop app update staged since HH:MM (version); it will kill every
+app-hosted session when applied`. The app announces a staged update every 20
+minutes ("Staged version V is still current"); applying it quits the app
+("beforeQuitForUpdate handler fired", "[CCD] Killing N PTY process tree(s) on
+quit"), which is what ended the ceremony session on 2026-09-05. The line
+disappears once the log shows the version installed, the installed
+`Claude.app` already carries it, or the announcement has not repeated for 90
+minutes. `--json` carries the same under `desktop_app`.
 
 ## Reset credits
 
@@ -372,6 +476,9 @@ brief.md → alert via
 - app shadows a lane (warn, once per app-account change, no re-alert): the
   desktop app is signed into a lane's account — that lane may get revoked
   while the app stays there; heal named if it dies
+- a dead session with pending work (liveness.py, Telegram via `tg`): no live
+  process or revive host, waiting on notifications only a process can take,
+  past the grace period — see "Liveness alert" above
 - session mirror stalled (warn) — desktop session mirroring stopped, so
   account switches would hide sessions; heartbeat = the mirror's per-pass
   state sidecar mtime (the log is silent on no-op runs),
@@ -460,7 +567,19 @@ SMAppService.
 
 `subfleet enroll <email>` stores a per-account OAuth token (from
 `claude setup-token`, pasted via stdin) in the agent keychain as
-`claude-quota-<email>` and records it in claude-accounts.json. A usage-endpoint
+`claude-quota-<email>` and records it in claude-accounts.json.
+`subfleet enroll <email> --mint` leaves you one click. It runs
+`claude setup-token` inside a subfleet-owned pty; the CLI opens the browser
+and receives the code on its own localhost callback (sign in as that
+account), and subfleet captures the token from the output stream, stores
+it, and never displays it. A masked diagnostic lands in
+`state/subfleet/enroll-mint-last.json`. The CLI's "Paste code here if
+prompted" line is only its fallback; `--paste` makes subfleet prompt for
+that code and type it in. Do not rewrite the CLI's `redirect_uri` to
+another listener: the token exchange must name the redirect target the code
+was issued for, so the CLI gets a 400. Piping `claude setup-token | subfleet
+enroll` cannot work: without a TTY the CLI never prints a token and the pipe
+carries its instructions instead. A usage-endpoint
 403 is accepted as the expected inference-only scope (401 is still rejected).
 The full roster (10 accounts) lives in claude-accounts.json.
 
@@ -496,12 +615,12 @@ remove the statusLine key from ~/.claude/settings.json. To unload the watchdog:
 
 ## subfleet run (the dispatch front door)
 
-`subfleet run [--task TASK --tier TIER] [-m fable|opus|sonnet|sol|terra|astra|haiku] [-C DIR]
+`subfleet run [--task TASK --tier TIER] [-m fable|opus|sonnet|sol|terra|astra|luna|haiku] [-C DIR]
 [-o OUT] [-n NAME] [-d | --attach] [--json] [--overflow] [--dry-run]
 (-p PROMPTFILE | PROMPT_TEXT)` dispatches through the hardened Claude and
 Codex runners. `-t fable|review|build|sweep` remains as a legacy coarse-class
 override. `-m` is the expert escape hatch: it pins one exact model and disables
-capability fallback.
+capacity fallback, subject to the Fable reserve exception below.
 
 Model aliases: `fable` = claude-fable-5-1, `opus` = claude-opus-5, `sonnet`,
 `haiku` = claude-haiku-4-5-20251001 (Claude lanes); `terra` = gpt-5.6-terra,
@@ -522,7 +641,9 @@ gpt-5.6 luna for some of the simple subagent work" — so the trivial and easy
 tiers of lookup, research, review and build now route to Luna instead of Haiku
 and Sonnet, which the Fable reserve had been rerouting upward to Fable anyway
 (a Claude account's small models draw its shared weekly bucket; Luna draws
-nothing from Claude). Luna runs at the catalog default effort, not `ultra`.
+nothing from Claude). The dispatcher explicitly sets Luna effort to `low`
+for trivial work and `medium` for other tiers and untiered exact pins,
+including handoffs. This overrides any home-configured effort such as `ultra`.
 Haiku and Sonnet stay reachable only by exact `-m` pin. `--to luna` is a
 handoff target; gate peers stay Fable/Astra.
 
@@ -578,7 +699,6 @@ reading status) for every enrolled lane and login dir. Policy overrides live in
 is an operator action, deliberately not an environment variable an agent could
 prepend to a command.
 
-
 For ordinary dispatches, name the work and its minimum capability instead of a
 provider model:
 
@@ -615,11 +735,22 @@ When a tier is conclusively exhausted, routing may move only upward
 (Luna → Opus → Astra); it never silently moves downward. Fable-role
 rows remain on Fable, hard work remains Astra, and non-hard sweeps retain the
 legacy Opus overflow only if the whole Codex fleet is exhausted. Exact `-m`
-pins never fall back. The task controls permissions: build defaults to
+pins disable capacity fallback; the Fable reserve can still upgrade a pinned
+non-Fable Claude model to Fable as described above. The task controls permissions: build defaults to
 `workspace-write`; every other semantic task defaults to `read-only`.
 Capacity-based promotion happens before launch. Synchronous runs can also
 promote after runtime exhaustion; an already-detached run keeps its selected
 model, rotates eligible lanes, and reports exhaustion if none succeeds.
+
+The Codex runner normalizes recognized usage-limit failures independently of
+the provider's exit code: `4` means no alternate in the allowed scope (a
+pinned home or the picker's current candidates), while `8` means the quota
+retry budget ended without checking another home. Ordinary provider exits
+`4` and `8` become generic failure `1`; other error codes retain their values.
+Neither quota outcome alone proves the whole fleet exhausted. Synchronous
+dispatch refreshes capacity and applies live home cooldowns to the shared
+Luna/Astra pool before promotion. If another home still has capacity, the
+bounded attempt returns its quota status; the next dispatch can use that home.
 
 ### Detached by default inside a Claude session; the session is told when it finishes
 
@@ -640,13 +771,39 @@ exports — `subfleet run` therefore:
    channel `SendMessage` uses (`~/.claude/sessions/<pid>.json` registry +
    unix socket + published peer token). The recipient is resolved by SESSION
    ID at finish time, so it still arrives after the session restarted under a
-   new pid (verified live 2026-08-23: dispatched from pid 78753, delivered to
-   pid 76529). An idle session wakes into a turn; a busy one sees it at its
-   next tool boundary.
+   new pid (verified live 2026-08-23 at a CLI-hosted session: dispatched from
+   pid 78753, delivered to pid 76529; an idle session woke into a turn, a busy
+   one saw it at its next tool boundary).
 5. if the session is not running at that moment, the notice is parked in
    `state/subfleet/notices/<session>.jsonl`; `bin/subfleet-hook`
    (SessionStart + UserPromptSubmit, registered by `subfleet hooks install`)
    hands it to the session as context the next time it is up.
+6. **a delivered push is not a wake.** Measured 2026-09-06 21:40:10 at a
+   desktop-app seat (session 29c03102): the push was recorded delivered
+   (`push.delivered: true`, pid 89257, `/tmp/cc-socks/89257.sock`), the
+   seat's transcript holds no entry between 01:34:15Z and 09:43:30Z — a push
+   that lands writes the notice within seconds, as a `user` entry when it
+   opens a turn or as a `queue-operation` + `attachment` pair when it rides
+   along the next turn — and the app paused the seat on its 900 s idle
+   timeout at 21:49:15 (`main.log`: "Pausing session … (idle_timeout)").
+   The seat produced nothing until Max typed at 05:43. So a push is recorded
+   `pushed` but never `surfaced` at push time; it is confirmed only when the
+   transcript shows the notice (`notify.push_evidence`) or a hook renders
+   it. A detached follow-up (`subfleet _notice-followup`, spawned with the
+   notice; every `subfleet revive` pass is the backstop) checks after the
+   grace (`SUBFLEET_NOTICE_FOLLOWUP_S`, default 300): a live but silent
+   session gets one re-push, then the notice is marked LOST and the hooks
+   render it at the next prompt or start; a session with no live registry
+   pid gets a one-shot `claude -p --resume` host with the notice as its
+   prompt (`tickle.notice_followup`; same guards as `revive`: bypass mode
+   only, never a lane or a retired session, loop guard, 25-minute cooldown,
+   the session's own model, no launch on top of a host subfleet already
+   runs). `subfleet notices [--session ID]` shows where each notice stands
+   (pushed / landed / lost / revived / parked); `subfleet runs` carries the
+   same word in its `notify` column; liveness lists a dead session whose
+   notice never reached it. `SUBFLEET_NOTICE_FOLLOWUP=off` disables the
+   follow-up; notices older than `SUBFLEET_NOTICE_FOLLOWUP_MAX_AGE_H`
+   (default 12) are left to the hooks.
 
 Flags: `-d` forces detached anywhere; `--attach` keeps the detached launch
 but waits inline (rc = the run's rc; output echoed when `-o` was omitted,
@@ -727,6 +884,15 @@ does not run an autonomous editor: the driving agent handles findings and
 repeats `continue` until agreement or a reported blocker. Agreement with one
 peer is sufficient; a third agent is not required.
 
+For a Fable peer, `--peer-account EMAIL` pins an enrolled Claude lane and
+repeatable `--exclude-account EMAIL` keeps selected accounts out of automatic
+routing. These options apply only to the current dispatch on `gate plan`,
+`gate pr`, or `gate continue`; repeat them on later continuations when needed.
+They do not become persistent gate defaults. Dry runs show the requested
+routing, and each completed review attempt records its dispatch arguments.
+A pinned account cannot also be excluded. The model pin, revision approval,
+and model attestation checks remain required.
+
 Plan agreement writes a consensus certificate and authorizes the main agent to
 proceed; it never runs arbitrary commands. PR merge is the sole built-in
 external action. It requires a clean checkout at the exact PR head, binds both
@@ -745,8 +911,17 @@ approval; a closed PR or unknown queue state does not trigger another merge.
 A changed artifact, malformed peer verdict, approval with nonempty findings
 or notes, failed dispatch, missing positive Fable model attestation, a downgrade,
 pending/failed/absent CI, or
-mergeability uncertainty fails closed. Gates stop after four peer rounds by
-default (`--max-rounds` changes the bound).
+mergeability uncertainty fails closed. Gates have no review-round cap by
+default. Set `--max-rounds N` to request a positive cap explicitly; `0` means
+unlimited. Each additional round still requires main approval of the exact
+revision and, after requested changes, a changed artifact or a response.
+
+Existing gates retain their recorded limit. To remove it without losing review
+history, use `subfleet gate continue <id> --max-rounds 0 --main-approve` with the
+appropriate `--expect-...` fingerprint and any needed `--response FILE`. The
+change is recorded when an approved continuation applies it; `--dry-run` only previews it.
+Removing a cap does not approve the artifact, bypass a live review, or skip
+review, attestation, CI or merge checks.
 
 Peers run from temporary directories outside the repository, with an immutable
 artifact copy and source access for PRs. Automatic project instructions,
