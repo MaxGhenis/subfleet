@@ -154,7 +154,9 @@ measurement (2026-09-17T19:55Z) through 2026-09-27T23:59Z (`computed`):
   `~/subfleet-v2/.claude/workflows/`, and an untracked per-item version from
   2026-09-18 in `~/subfleet/.claude/workflows/`. A project copy wins a name tie
   (`doc`), and this session, started under `~/subfleet`, listed the per-item
-  copy (`observed`).
+  copy (`observed`). On 2026-10-04 the per-item copy was deleted and the
+  other two were replaced by the revised workflow in subfleet-v2
+  (`.claude/workflows/subfleet-fanout.js`; `observed`).
 - `ultracode` is `true` and `CLAUDE_CODE_EFFORT_LEVEL` is `xhigh` in
   `~/.claude/settings.json`, so Claude plans a workflow for each substantive
   task (`observed`; `doc`, model-config page).
@@ -371,7 +373,9 @@ request id is `<id>-<n>` and a repeat with an equal payload digest returns the
 existing job (`cli.py:952-957`; `daemon.py:1317-1325`). The digest includes
 the workdir's HEAD and the policy hash, so a relaunch after either changes is
 refused instead (`subfleet/ids.py:54-92`). The
-saved-workflow runs recorded on this machine, all 12 (`computed`):
+saved-workflow runs recorded on this machine, all 12 with a state file
+(`computed`), plus one killed run that left only a transcript (`observed`,
+added 2026-10-04):
 
 | Run | Date | Shape | Status | Wall | Login tokens | Outcome |
 |---|---|---|---|---|---|---|
@@ -379,6 +383,7 @@ saved-workflow runs recorded on this machine, all 12 (`computed`):
 | `wf_06e602f8-308` | 09-18 | per item, 2 dispatchers (v1) | completed | 706 s | 79,719 | Both rc 0; the long item needed 2 wait slices |
 | `wf_a6e32b6d-4d1` | 09-22 | batch of 5 | killed | 969 s | 50,373 | Submitted; one 540 s slice, then interrupted |
 | `wf_8d956f8e-83f` | 09-22 | batch of 5 | killed | 170 s | 43,456 | Submitted; wait interrupted |
+| `wf_98ce7f93-aa9` | 09-22 | batch of 2 | killed | 7,269 s | 11,277, plus 1,320,152 cache writes | 13 full 540 s slices with both jobs queued throughout; killed in the 14th when the session ended; the jobs started 3 h 42 min after submission and succeeded unattended (subfleet-v2 `docs/reports/2026-09-22-fanout-workflow.md`) |
 | `wf_a201784d-a1e` | 09-23 | batch of 4 | killed | 85 s | 46,438 | Submitted; wait interrupted |
 | `wf_ec9748e1-acd` | 09-24 | batch of 3 | completed | 22 s | 43,461 | State directory missing; nothing submitted |
 | `wf_1dcf8842-47d` | 09-24 | batch of 2 | completed | 2,967 s | 66,092 | One 540 s slice timed out, then 19 slices returned at once with rc 1 or 69 (daemon unavailable); gave up at 20 with neither job finished |
@@ -401,6 +406,15 @@ What this shows:
 - **Login cost is flat per batch.** One dispatcher costs 43,000 to 66,000
   Haiku tokens whether it carries 2 jobs or 13; the per-item version cost
   about 40,000 per item. A native Opus 5.5 reader cost 265,000.
+- **Login cost is flat per batch only while nothing waits.** The one run that
+  waited, `wf_98ce7f93-aa9`, spent 13 slices queued and wrote 1,320,152
+  five-minute cache tokens, about 90,000 per slice: a 540 s slice outlives the
+  cache's five-minute lifetime (`doc`, prompt caching page), and both API turns
+  of every slice re-wrote the dispatcher's whole context (`observed`,
+  2026-09-22; measured 2026-10-04 in subfleet-v2
+  `docs/reports/2026-09-22-fanout-workflow.md`). Whether cache writes count
+  against the plan's windows is not determined. Its notices stayed `pending`
+  for twelve days and surfaced at the session's next SessionStart hook.
 - **The daemon was the weak link.** 5 of the 10 batch-era runs met a daemon
   that refused, failed mid-submit or stopped answering. 3 more were killed
   mid-wait, and 1 had a caller error.
